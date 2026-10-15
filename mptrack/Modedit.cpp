@@ -281,6 +281,10 @@ CHANNELINDEX CModDoc::ReArrangeChannels(const std::vector<CHANNELINDEX> &newOrde
 			SetDefaultChannelColors(chn);
 		}
 	}
+	// Parent bus references follow channel moves, duplication and deletion.
+	for(auto &track : m_SndFile.ChnSettings)
+		if(track.parentBus != CHANNELINDEX_INVALID)
+			track.parentBus = track.parentBus < newIndex.size() ? newIndex[track.parentBus] : CHANNELINDEX_INVALID;
 	// Reset MOD panning (won't affect other module formats)
 	m_SndFile.SetupMODPanning();
 	m_SndFile.InitAmigaResampler();

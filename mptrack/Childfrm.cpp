@@ -527,6 +527,11 @@ std::string PatternViewState::Serialize() const
 	std::ostringstream f(std::ios::out | std::ios::binary);
 	mpt::IO::WriteVarInt(f, initialized ? nOrder : initialOrder);
 	mpt::IO::WriteVarInt(f, visibleColumns.to_ulong());
+	mpt::IO::WriteVarInt(f, automationLanes.size());
+	for(auto lanes : automationLanes) mpt::IO::WriteVarInt(f, lanes);
+	mpt::IO::WriteVarInt(f, defaultTrackWidth);
+	mpt::IO::WriteVarInt(f, trackWidths.size());
+	for(auto width : trackWidths) mpt::IO::WriteVarInt(f, width);
 	return std::move(f).str();
 }
 
@@ -537,6 +542,19 @@ void PatternViewState::Deserialize(FileReader &f)
 	unsigned long columns = 0;
 	if(f.ReadVarInt(columns))
 		visibleColumns = columns;
+	size_t count = 0;
+	if(f.ReadVarInt(count) && count <= MAX_BASECHANNELS)
+	{
+		automationLanes.assign(count, 0);
+		for(auto &lanes : automationLanes) f.ReadVarInt(lanes);
+	}
+	f.ReadVarInt(defaultTrackWidth);
+	count = 0;
+	if(f.ReadVarInt(count) && count <= MAX_BASECHANNELS)
+	{
+		trackWidths.assign(count, 0);
+		for(auto &width : trackWidths) f.ReadVarInt(width);
+	}
 }
 
 

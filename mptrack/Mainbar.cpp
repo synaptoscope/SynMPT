@@ -295,7 +295,8 @@ END_MESSAGE_MAP()
 
 BOOL CMainToolBar::Create(CWnd *parent)
 {
-	if(!CToolBar::Create(parent, WS_CHILD | WS_VISIBLE | CBRS_TOP | CBRS_SIZE_DYNAMIC | CBRS_TOOLTIPS | CBRS_FLYBY))
+	if(!CToolBar::Create(parent, WS_CHILD | WS_VISIBLE | CBRS_TOP | CBRS_GRIPPER | CBRS_SIZE_DYNAMIC | CBRS_TOOLTIPS | CBRS_FLYBY,
+		m_transport ? IDW_SYN_TRANSPORT : AFX_IDW_TOOLBAR))
 		return FALSE;
 
 	SetButtons(MainButtons, static_cast<int>(std::size(MainButtons)));
@@ -319,7 +320,7 @@ BOOL CMainToolBar::Create(CWnd *parent)
 	m_EditRowsPerBeat.Create(WS_CHILD | WS_BORDER | WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL | ES_NUMBER, rect, this, IDC_EDIT_RPB);
 	m_SpinRowsPerBeat.Create(WS_CHILD | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS, rect, this, IDC_SPIN_RPB);
 	// Global Volume
-	m_StaticGlobalVolume.Create(_T("Global Volume:"), WS_CHILD | SS_CENTER | SS_CENTERIMAGE, rect, this, IDC_TEXT_GLOBALVOL);
+	m_StaticGlobalVolume.Create(m_transport ? _T("Master:") : _T("Global Volume:"), WS_CHILD | SS_CENTER | SS_CENTERIMAGE, rect, this, IDC_TEXT_GLOBALVOL);
 	m_EditGlobalVolume.Create(WS_CHILD | WS_BORDER | WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL | ES_NUMBER, rect, this, IDC_EDIT_GLOBALVOL);
 	m_SpinGlobalVolume.Create(WS_CHILD | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS, rect, this, IDC_SPIN_GLOBALVOL);
 
@@ -346,7 +347,7 @@ BOOL CMainToolBar::Create(CWnd *parent)
 	m_EditGlobalVolume.SetLimitText(3);
 
 	// Display everything
-	SetWindowText(_T("Main"));
+	SetWindowText(m_transport ? _T("Transport") : _T("Main"));
 	SetBaseOctave(4);
 	SetCurrentSong(nullptr);
 	EnableDocking(CBRS_ALIGN_ANY);
@@ -419,7 +420,7 @@ void CMainToolBar::UpdateSizes()
 		{m_EditSpeed,          _T("999"),            EDITSPEED_INDEX,     IDC_EDIT_CURRENTSPEED},
 		{m_StaticRowsPerBeat,  _T("Rows/Beat:"),     RPBTEXT_INDEX,       IDC_TEXT_RPB         },
 		{m_EditRowsPerBeat,    _T("9999"),           EDITRPB_INDEX,       IDC_EDIT_RPB         },
-		{m_StaticGlobalVolume, _T("Global Volume:"), GLOBALVOLTEXT_INDEX, IDC_TEXT_GLOBALVOL   },
+		{m_StaticGlobalVolume, m_transport ? _T("Master:") : _T("Global Volume:"), GLOBALVOLTEXT_INDEX, IDC_TEXT_GLOBALVOL   },
 		{m_EditGlobalVolume,   _T("999"),            EDITGLOBALVOL_INDEX, IDC_EDIT_GLOBALVOL   },
 	};
 	
@@ -481,7 +482,10 @@ void CMainToolBar::SetVertical()
 
 void CMainToolBar::UpdateControls()
 {
-	const FlagSet<MainToolBarItem> visibleItems = TrackerSettings::Instance().mainToolBarVisibleItems.Get();
+	FlagSet<MainToolBarItem> visibleItems = TrackerSettings::Instance().mainToolBarVisibleItems.Get();
+	// Both bars use the existing commands and playback controls, with no duplicated visible controls.
+	const auto transportItems = MainToolBarItem::IconsPlayback | MainToolBarItem::Tempo | MainToolBarItem::GlobalVolume | MainToolBarItem::VUMeter;
+	visibleItems &= m_transport ? transportItems : ~transportItems;
 
 	SetButtonVisibility(FILE_NEW_INDEX, visibleItems[MainToolBarItem::IconsFile]);
 	SetButtonVisibility(FILE_OPEN_INDEX, visibleItems[MainToolBarItem::IconsFile]);
@@ -531,7 +535,7 @@ void CMainToolBar::UpdateControls()
 	if(m_bVertical)
 		m_VuMeter.SetWindowPos(nullptr, 0, 0, VUMETER_HEIGHT, VUMETER_HEIGHT, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 	else
-		m_VuMeter.SetWindowPos(nullptr, 0, 0, VUMETER_WIDTH, VUMETER_HEIGHT, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+		m_VuMeter.SetWindowPos(nullptr, 0, 0, m_transport ? SCALEPIXELS(96) : VUMETER_WIDTH, VUMETER_HEIGHT, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 	UpdateControl(visibleItems[MainToolBarItem::VUMeter], m_VuMeter, VUMETER_INDEX, IDC_VUMETER, VUMETER_HEIGHT);
 }
 
@@ -1747,7 +1751,8 @@ void CStereoVU::DrawVuMeter(CDC &dc, const CRect &rect, int index, bool redraw)
 {
 	uint32 vu = vuMeter[index];
 
-	if(CMainFrame::GetMainFrame()->GetSoundFilePlaying() == nullptr)
+	const auto *mainFrame = CMainFrame::GetMainFrame();
+	if(mainFrame == nullptr || mainFrame->GetSoundFilePlaying() == nullptr)
 	{
 		vu = 0;
 	}
@@ -1807,8 +1812,11 @@ void CStereoVU::DrawVuMeter(CDC &dc, const CRect &rect, int index, bool redraw)
 void CStereoVU::OnLButtonDown(UINT, CPoint)
 {
 	// Reset clip indicator.
-	CMainFrame::GetMainFrame()->m_VUMeterInput.ResetClipped();
-	CMainFrame::GetMainFrame()->m_VUMeterOutput.ResetClipped();
+	if(auto *mainFrame = CMainFrame::GetMainFrame())
+	{
+		mainFrame->m_VUMeterInput.ResetClipped();
+		mainFrame->m_VUMeterOutput.ResetClipped();
+	}
 }
 
 

@@ -42,6 +42,7 @@
 #include "../soundlib/Dlsbank.h"
 #include "../soundlib/plugins/PluginManager.h"
 #include "../test/test.h"
+#include "../test/synmpt/runtime.h"
 #include "mpt/arch/arch.hpp"
 #include "mpt/fs/common_directories.hpp"
 #include "mpt/fs/fs.hpp"
@@ -326,7 +327,7 @@ public:
 	std::vector<mpt::PathString> m_fileNames;
 	bool m_noDls = false, m_noPlugins = false, m_noAssembly = false, m_noSysCheck = false, m_noWine = false,
 		m_portable = false, m_noCrashHandler = false, m_debugCrashHandler = false, m_sharedInstance = false,
-		m_autoPlay = false;
+		m_autoPlay = false, m_synmptChecks = false;
 #ifdef ENABLE_TESTS
 	bool m_noTests = false;
 #endif
@@ -343,6 +344,7 @@ public:
 	{
 		if(isFlag)
 		{
+			if(!lstrcmpi(param, _T("synmptChecks"))) { m_synmptChecks = true; return; }
 			if(!lstrcmpi(param, _T("nologo"))) { m_bShowSplash = FALSE; return; }
 			if(!lstrcmpi(param, _T("nodls"))) { m_noDls = true; return; }
 			if(!lstrcmpi(param, _T("noplugs"))) { m_noPlugins = true; return; }
@@ -1420,6 +1422,11 @@ BOOL CTrackApp::InitInstanceImpl(CMPTCommandLineInfo &cmdInfo)
 	m_pDebugSettings = std::make_unique<DebugSettings>(*m_pSettings);
 
 	m_pTrackerSettings = std::make_unique<TrackerSettings>(*m_pSettings);
+	if(cmdInfo.m_synmptChecks)
+	{
+		const int result = SynMPTChecks::Run(GetInstallBinArchPath(), cmdInfo.m_fileNames);
+		::ExitProcess(static_cast<UINT>(result));
+	}
 
 	MPT_LOG_GLOBAL(LogInformation, "", U_("OpenMPT settings initialized."));
 
@@ -2436,6 +2443,15 @@ void CFastBitmap::TextBlt(int x, int y, int cx, int cy, int srcx, int srcy, MODP
 	}
 }
 
+
+void CFastBitmap::FillRect(int x, int y, int width, int height, uint8 color)
+{
+	const int stride = m_Dib.bmiHeader.biWidth, rows = m_Dib.bmiHeader.biHeight;
+	const int right = std::min(x + width, stride), bottom = std::min(y + height, rows);
+	for(int row = std::max(0, y); row < bottom; row++)
+		if(right > std::max(0, x))
+			std::fill_n(m_Dib.DibBits.begin() + (rows - row - 1) * stride + std::max(0, x), right - std::max(0, x), static_cast<uint8>(color + m_nBlendOffset));
+}
 
 void CFastBitmap::SetSize(int x, int y)
 {

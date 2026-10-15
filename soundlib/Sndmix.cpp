@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "TrackRouting.h"
 
 #include "Sndfile.h"
 #include "MixerLoops.h"
@@ -719,6 +720,17 @@ bool CSoundFile::ProcessRow()
 			chn.nCommand = CMD_NONE;
 			chn.m_plugParamValueStep = 0;
 			chn.rowCommand = *m++;
+			const auto channel = static_cast<CHANNELINDEX>(&chn - m_PlayState.Chn.data());
+			const auto &track = ChnSettings[channel];
+			if(track.isBus && !chn.rowCommand.IsPcNote())
+			{
+				chn.rowCommand.note = NOTE_NONE;
+				chn.rowCommand.instr = 0;
+			} else if(track.trackInstrument && !chn.rowCommand.IsPcNote()
+				&& (chn.rowCommand.IsNote() || chn.rowCommand.instr))
+			{
+				chn.rowCommand.instr = static_cast<ModCommand::INSTR>(track.trackInstrument);
+			}
 		}
 
 		// Now that we know which pattern we're on, we can update time signatures (global or pattern-specific)
@@ -2161,6 +2173,13 @@ bool CSoundFile::ReadNote()
 	////////////////////////////////////////////////////////////////////////////////////
 	// Update channels data
 	m_nMixChannels = 0;
+	std::array<TrackBusGain, MAX_BASECHANNELS> busGains;
+	for(CHANNELINDEX track = 0; track < GetNumChannels(); track++)
+		busGains[track] = GetTrackBusGain(ChnSettings, track, [&](CHANNELINDEX bus) {
+			const auto &state = m_PlayState.Chn[bus];
+			return std::tuple{Clamp<int>(state.nGlobalVol, 0, 64), Clamp<int>(state.nPan, 0, 256),
+				state.dwFlags[CHN_MUTE | CHN_SYNCMUTE] || ChnSettings[bus].dwFlags[CHN_MUTE]};
+		});
 	for(CHANNELINDEX nChn = 0; nChn < m_PlayState.Chn.size(); nChn++)
 	{
 		ModChannel &chn = m_PlayState.Chn[nChn];
@@ -2544,6 +2563,14 @@ bool CSoundFile::ReadNote()
 					chn.newLeftVol = (realvol * (256 - pan)) / 256;
 					chn.newRightVol = (realvol * pan) / 256;
 				}
+			}
+			// Linear group gain/balance is distributive over the stereo sum. Apply it
+			// to every child voice before ramping, including voices released into NNA.
+			const CHANNELINDEX source = nChn < GetNumChannels() ? nChn : (chn.nMasterChn ? chn.nMasterChn - 1 : CHANNELINDEX_INVALID);
+			if(source < GetNumChannels())
+			{
+				chn.newLeftVol = static_cast<int32>(static_cast<int64>(chn.newLeftVol) * busGains[source].left / 65536);
+				chn.newRightVol = static_cast<int32>(static_cast<int64>(chn.newRightVol) * busGains[source].right / 65536);
 			}
 			// Clipping volumes
 			//if (chn.nNewRightVol > 0xFFFF) chn.nNewRightVol = 0xFFFF;

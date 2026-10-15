@@ -201,6 +201,7 @@ protected:
 	CModTreeBar m_wndTree;
 	CStatusBar m_wndStatusBar;
 	CMainToolBar m_wndToolBar;
+	CMainToolBar m_wndTransport{true};
 	CSoundFile *m_pSndFile = nullptr; // != NULL only when currently playing or rendering
 	HWND m_hWndMidi = nullptr;
 	std::function<void(mpt::const_byte_span)> m_midiSysExCallback;
@@ -493,6 +494,10 @@ protected:
 	afx_msg void OnToggleMainBarShowMiscIcons();
 	afx_msg void OnToggleMainBarItem(MainToolBarItem item, UINT menuID);
 	afx_msg void OnToggleTreeViewOnLeft();
+	afx_msg void OnViewTransport();
+	afx_msg void OnUpdateViewTransport(CCmdUI *cmdUI);
+	afx_msg void OnBringTransportHere();
+	void ShowTransport(bool resetPosition);
 
 	afx_msg void OnCreateMixerDump();
 	afx_msg void OnVerifyMixerDump();

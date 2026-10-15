@@ -1335,6 +1335,17 @@
 #define ID_FILE_SAVEOPL                 44654
 #define ID_CONVERT_NORMAL_TO_SUSTAIN    44655
 #define ID_CONVERT_SUSTAIN_TO_NORMAL    44656
+#define ID_VIEW_TRANSPORT               44657
+#define ID_TRANSPORT_BRING_HERE          44658
+#define IDW_SYN_TRANSPORT                0xE802
+#define ID_TRACK_AUTOMATION_PAN         44659
+#define ID_TRACK_AUTOMATION_VOLUME      44660
+#define ID_TRACK_WIDER_ALL              44661
+#define ID_TRACK_NARROWER_ALL           44662
+#define ID_TRACK_WIDER_SELECTED         44663
+#define ID_TRACK_NARROWER_SELECTED      44664
+#define ID_TRACK_INSTRUMENT             44665
+#define ID_TRACK_GROUP_OUTPUT           44666
 
 // Next default values for new objects
 // 
@@ -1342,7 +1353,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_3D_CONTROLS                     1
 #define _APS_NEXT_RESOURCE_VALUE        543
-#define _APS_NEXT_COMMAND_VALUE         44657
+#define _APS_NEXT_COMMAND_VALUE         44667
 #define _APS_NEXT_CONTROL_VALUE         2518
 #define _APS_NEXT_SYMED_VALUE           901
 #endif

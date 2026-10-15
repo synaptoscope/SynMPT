@@ -2781,6 +2781,23 @@ BEGIN
         MENUITEM "&Instruments\tAlt+N",         ID_VIEW_INSTRUMENTS
         MENUITEM "&Comments\tShift+F9",         ID_VIEW_COMMENTS
         MENUITEM SEPARATOR
+        POPUP "Track &Controls"
+        BEGIN
+            MENUITEM "Wider: &All Tracks",       ID_TRACK_WIDER_ALL
+            MENUITEM "Narrower: A&ll Tracks",    ID_TRACK_NARROWER_ALL
+            MENUITEM "Wider: &Selected Track",   ID_TRACK_WIDER_SELECTED
+            MENUITEM "Narrower: S&elected Track", ID_TRACK_NARROWER_SELECTED
+            MENUITEM SEPARATOR
+            MENUITEM "Track &Instrument...",     ID_TRACK_INSTRUMENT
+            MENUITEM "&Group / Output...",        ID_TRACK_GROUP_OUTPUT
+        END
+        POPUP "Track &Automation"
+        BEGIN
+            MENUITEM "&Pan",                    ID_TRACK_AUTOMATION_PAN
+            MENUITEM "&Volume",                 ID_TRACK_AUTOMATION_VOLUME
+        END
+        MENUITEM "&Transport",                  ID_VIEW_TRANSPORT
+        MENUITEM "Bring Transport &Here",         ID_TRANSPORT_BRING_HERE
         POPUP "&Toolbars"
         BEGIN
             MENUITEM "&Main",                       ID_VIEW_TOOLBAR
@@ -3000,6 +3017,8 @@ END
 STRINGTABLE
 BEGIN
     ID_VIEW_TOOLBAR         "Show or hide the main toolbar\nToggle ToolBar"
+    ID_VIEW_TRANSPORT       "Show or hide the dockable transport\nTransport"
+    ID_TRANSPORT_BRING_HERE  "Show the transport beside the main window\nBring Transport Here"
     ID_VIEW_STATUS_BAR      "Show or hide the status bar\nToggle StatusBar"
 END
 

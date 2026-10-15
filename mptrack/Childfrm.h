@@ -42,6 +42,9 @@ struct PatternViewState
 	ORDERINDEX nOrder = 0;
 	ORDERINDEX initialOrder = ORDERINDEX_INVALID;
 	std::bitset<PatternCursor::numColumns> visibleColumns;
+	std::vector<uint8> automationLanes;
+	std::vector<uint16> trackWidths;
+	uint16 defaultTrackWidth = 0;
 	bool initialized = false;
 
 	std::string Serialize() const;

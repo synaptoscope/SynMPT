@@ -181,6 +181,7 @@ BOOL CModDoc::OnNewDocument()
 
 	m_SndFile.Create(FileReader(), CSoundFile::loadCompleteModule, this);
 	InitializeMod();
+	m_SndFile.m_PlayState.m_flags.reset(SONG_PATTERNLOOP);
 
 	ReinitRecordState();
 	SetModified(false);
@@ -240,6 +241,9 @@ BOOL CModDoc::OnOpenDocument(LPCTSTR lpszPathName)
 
 	if((GetModType() == MOD_TYPE_NONE) || (!m_SndFile.GetNumChannels()))
 		return FALSE;
+
+	// Opening a song starts in song mode; pattern looping is an explicit playback command.
+	m_SndFile.m_PlayState.m_flags.reset(SONG_PATTERNLOOP);
 
 	const bool noColors = std::find_if(std::begin(m_SndFile.ChnSettings), std::begin(m_SndFile.ChnSettings) + GetNumChannels(), [](const auto &settings) {
 		return settings.color != ModChannelSettings::INVALID_COLOR;

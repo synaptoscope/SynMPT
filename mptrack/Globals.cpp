@@ -239,7 +239,7 @@ void CModControlView::OnInitialUpdate() // called first time after construct
 	GetClientRect(&rect);
 	m_TabCtrl.Create(WS_CHILD|WS_VISIBLE|TCS_FOCUSNEVER|TCS_FORCELABELLEFT, rect, this, IDC_TABCTRL1);
 	UpdateView(UpdateHint().ModType());
-	SetActivePage(Page::First);
+	SetActivePage(Page::Patterns);
 }
 
 
@@ -455,7 +455,7 @@ void CModControlView::UpdateView(UpdateHint lHint, CObject *pObject)
 			if(pActiveDlg)
 				pActiveDlg->ShowWindow(SW_HIDE);
 			m_TabCtrl.DeleteAllItems();
-			if (mask & 1) m_TabCtrl.InsertItem(count++, _T("General"), IDD_CONTROL_GLOBALS, IMAGE_GENERAL);
+			if (mask & 1) m_TabCtrl.InsertItem(count++, _T("Song"), IDD_CONTROL_GLOBALS, IMAGE_GENERAL);
 			if (mask & 2) m_TabCtrl.InsertItem(count++, _T("Patterns"), IDD_CONTROL_PATTERNS, IMAGE_PATTERNS);
 			if (mask & 4) m_TabCtrl.InsertItem(count++, _T("Samples"), IDD_CONTROL_SAMPLES, IMAGE_SAMPLES);
 			if (mask & 8) m_TabCtrl.InsertItem(count++, _T("Instruments"), IDD_CONTROL_INSTRUMENTS, IMAGE_INSTRUMENTS);

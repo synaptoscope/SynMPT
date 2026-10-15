@@ -19,6 +19,7 @@
 #include "Mptrack.h"
 #include "PatternEditorDialogs.h"
 #include "PatternClipboard.h"
+#include "PatternAutomation.h"
 #include "UpdateHints.h"
 
 OPENMPT_NAMESPACE_BEGIN
@@ -47,6 +48,18 @@ public:
 		ChannelHeader = 0x01000000,
 		PatternHeader = 0x02000000,
 		PluginName = 0x04000000,
+		ChannelVolume = 0x08000000,
+		ChannelPan = 0x10000000,
+		ChannelMute = 0x20000000,
+		ChannelSolo = 0x40000000,
+		PanLaneToggle = 0x50000000,
+		VolumeLaneToggle = 0x60000000,
+		PanLane = 0x70000000,
+		VolumeLane = 0x80000000,
+		ChannelRecord = 0x81000000,
+		ChannelInstrument = 0x82000000,
+		ChannelRouting = 0x83000000,
+		ChannelResize = 0x84000000,
 	};
 
 	DragItem() = default;
@@ -144,6 +157,22 @@ protected:
 	RECT m_rcDragItem, m_rcDropItem;
 	bool m_bInItemRect = false;
 
+	static constexpr int TrackNameHeight = 20;
+	static constexpr int TrackControlHeight = 18;
+	int m_defaultTrackWidth = 0;
+	CHANNELINDEX m_resizingTrack = CHANNELINDEX_INVALID;
+	int m_resizeStartX = 0, m_resizeStartWidth = 0;
+	DragItem m_trackSlider;
+	bool m_trackSliderUndo = false;
+	bool m_automationPresenceDirty = true;
+	bool m_automationLinePending = false, m_automationContext = false, m_automationClick = false;
+	AutomationNode m_lineStart, m_lineEnd;
+	bool m_automationDragging = false, m_automationErasing = false, m_automationUndo = false;
+	AutomationLane m_automationLane = AutomationLane::Pan;
+	CHANNELINDEX m_automationChannel = CHANNELINDEX_INVALID;
+	PATTERNINDEX m_automationPattern = PATTERNINDEX_INVALID;
+	int m_automationLastRow = -1, m_automationLastValue = 0;
+
 	// Drag-select record group
 	std::vector<RecordGroup> m_initialDragRecordStatus;
 
@@ -176,6 +205,9 @@ protected:
 		std::pair<PLUGINDEX, PlugParamIndex> previousPCevent = {PLUGINDEX_INVALID, 0};
 		ModCommand::NOTE previousNote = NOTE_NONE;
 		uint8 selectedCols = 0;
+		bool hasPanAutomation = false, hasVolumeAutomation = false;
+		bool panExpanded = false, volumeExpanded = false;
+		int widthDip = 0;
 	};
 
 	std::vector<ChannelState> m_chnState;
@@ -237,6 +269,43 @@ public:
 	PatternCursor GetPositionFromPoint(POINT pt) const;
 
 	DragItem GetDragItem(CPoint point, RECT &rect) const;
+	CRect GetTrackControlRect(CHANNELINDEX channel, DragItem::DragType type) const;
+	CRect GetTrackSliderRect(CHANNELINDEX channel, DragItem::DragType type) const;
+	bool CanEditTrackControl(DragItem::DragType type) const;
+	bool IsTrackSolo(CHANNELINDEX channel) const;
+	void DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth);
+	void UpdateTrackSlider(CPoint point);
+	void SetTrackSliderValue(int value);
+	int GetNoteTrackWidth(CHANNELINDEX channel) const;
+	void ResizeTracks(int delta, bool allTracks);
+	void ShowTrackInstrumentMenu(CHANNELINDEX channel);
+	CString GetTrackInstrumentLabel(CHANNELINDEX channel) const;
+	bool CanGroupTrack(CHANNELINDEX channel, uint16 instrument = 0) const;
+	void ShowTrackRoutingMenu(CHANNELINDEX channel);
+	void CreateGroupBus();
+	int GetTrackWidth(CHANNELINDEX channel) const;
+	int GetTrackScrollPixel(CHANNELINDEX channel) const;
+	CHANNELINDEX GetTrackAtScrollPixel(int pixel) const;
+	int GetTrackLeft(CHANNELINDEX channel) const;
+	int GetAutomationWidth(CHANNELINDEX channel, AutomationLane lane) const;
+	CRect GetAutomationRect(CHANNELINDEX channel, AutomationLane lane) const;
+	CHANNELINDEX FirstTrackToFit(CHANNELINDEX channel, int width) const;
+	AutomationFormat GetAutomationFormat() const;
+	void RefreshAutomationPresence();
+	void ToggleAutomationLane(CHANNELINDEX channel, AutomationLane lane);
+	void UpdateAutomationStroke(CPoint point);
+	void EndAutomationStroke();
+	int GetAutomationInitialValue(CHANNELINDEX channel, AutomationLane lane) const;
+	std::vector<AutomationNode> GetAutomationNodes(CHANNELINDEX channel, AutomationLane lane) const;
+	std::optional<AutomationNode> AutomationPointFromMouse(CHANNELINDEX channel, AutomationLane lane, CPoint point) const;
+	CPoint AutomationNodePosition(CHANNELINDEX channel, AutomationLane lane, AutomationNode point) const;
+	int FindAutomationNode(CHANNELINDEX channel, AutomationLane lane, CPoint point) const;
+	void AutomationLineClick(CHANNELINDEX channel, AutomationLane lane, CPoint point);
+	void WriteAutomationSegment(CHANNELINDEX channel, AutomationLane lane, const std::vector<AutomationNode> &nodes, int eraseFrom = -1, int eraseTo = -1);
+	void EditAutomationNode(CHANNELINDEX channel, AutomationLane lane, CPoint point, bool reset);
+	void CancelAutomationLine();
+	void DrawAutomationLanes(HDC dc, bool headers, int lineWidth);
+
 	
 	void StartRecordGroupDragging(const DragItem source);
 	void ResetRecordGroupDragging() { m_initialDragRecordStatus.clear(); }
@@ -371,6 +440,7 @@ protected:
 	afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
 	afx_msg void OnXButtonUp(UINT nFlags, UINT nButton, CPoint point);
 	afx_msg void OnMouseMove(UINT, CPoint);
+	afx_msg void OnCaptureChanged(CWnd *wnd);
 	afx_msg void OnLButtonUp(UINT, CPoint);
 	afx_msg void OnLButtonDown(UINT, CPoint);
 	afx_msg void OnLButtonDblClk(UINT, CPoint);
@@ -403,6 +473,14 @@ protected:
 	afx_msg void OnChannelReset();
 	afx_msg void OnMuteFromClick();
 	afx_msg void OnSoloFromClick();
+	afx_msg void OnPanAutomation() { ToggleAutomationLane(GetCurrentChannel(), AutomationLane::Pan); }
+	afx_msg void OnVolumeAutomation() { ToggleAutomationLane(GetCurrentChannel(), AutomationLane::Volume); }
+	afx_msg void OnTracksWider() { ResizeTracks(12, true); }
+	afx_msg void OnTracksNarrower() { ResizeTracks(-12, true); }
+	afx_msg void OnTrackWider() { ResizeTracks(12, false); }
+	afx_msg void OnTrackNarrower() { ResizeTracks(-12, false); }
+	afx_msg void OnTrackInstrument() { ShowTrackInstrumentMenu(GetCurrentChannel()); }
+	afx_msg void OnTrackGroupOutput() { ShowTrackRoutingMenu(GetCurrentChannel()); }
 	afx_msg void OnTogglePendingMuteFromClick();
 	afx_msg void OnPendingSoloChnFromClick();
 	afx_msg void OnPendingUnmuteAllChnFromClick();

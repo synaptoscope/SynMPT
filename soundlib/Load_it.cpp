@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "TrackRouting.h"
 #include "Loaders.h"
 #include "tuningcollection.h"
 #include "mod_specifications.h"
@@ -2455,6 +2456,21 @@ void CSoundFile::SaveExtendedSongProperties(std::ostream &f) const
 		mpt::IO::WriteRaw(f, songArtistU8.c_str(), length);
 	}
 
+	// SynMPT track routing and instrument overrides are MPTM extensions.
+	if(GetType() == MOD_TYPE_MPT && std::any_of(ChnSettings.begin(), ChnSettings.end(), [](const auto &track) {
+		return track.isBus || track.parentBus != CHANNELINDEX_INVALID || track.trackInstrument != 0;
+	}))
+	{
+		WriteModularHeader(f, MagicLE("SNTK"), 1 + GetNumChannels() * 5);
+		mpt::IO::WriteIntLE<uint8>(f, 1);
+		for(const auto &track : ChnSettings)
+		{
+			mpt::IO::WriteIntLE<uint16>(f, track.trackInstrument);
+			mpt::IO::WriteIntLE<uint16>(f, track.parentBus);
+			mpt::IO::WriteIntLE<uint8>(f, (track.isBus ? 1 : 0) | (track.isBus && track.dwFlags[CHN_MUTE] ? 2 : 0));
+		}
+	}
+
 #ifdef MODPLUG_TRACKER
 	// MIDI mapping directives
 	if(GetMIDIMapper().GetCount() > 0)
@@ -2611,6 +2627,22 @@ bool CSoundFile::LoadExtendedSongProperties(FileReader &file, bool ignoreChannel
 				}
 				break;
 #endif
+			case MagicLE("SNTK"):
+				if(GetType() == MOD_TYPE_MPT && chunk.ReadUint8() == 1)
+				{
+					for(CHANNELINDEX channel = 0; channel < GetNumChannels() && chunk.CanRead(5); channel++)
+					{
+						auto &track = ChnSettings[channel];
+						track.trackInstrument = std::min<uint16>(chunk.ReadUint16LE(), MAX_INSTRUMENTS - 1);
+						track.parentBus = chunk.ReadUint16LE();
+						const auto flags = chunk.ReadUint8();
+						track.isBus = (flags & 1) != 0;
+						if(track.isBus) track.dwFlags.set(CHN_MUTE, (flags & 2) != 0);
+					}
+					for(CHANNELINDEX channel = 0; channel < GetNumChannels(); channel++)
+						if(!VisitTrackBuses(ChnSettings, channel, [](CHANNELINDEX) {})) ChnSettings[channel].parentBus = CHANNELINDEX_INVALID;
+				}
+				break;
 			case MagicLE("AUTH"):
 				{
 					std::string artist;

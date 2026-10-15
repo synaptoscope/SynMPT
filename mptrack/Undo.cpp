@@ -216,6 +216,21 @@ PATTERNINDEX CPatternUndo::Undo(undobuf_t &fromBuf, undobuf_t &toBuf, bool linke
 		}
 		if(undo.firstChannel + undo.channelInfo.size() <= sndFile.GetNumChannels())
 		{
+			// Keep live playback in sync when a track fader is undone or redone.
+			for(size_t index = 0; index < undo.channelInfo.size(); index++)
+			{
+				const auto channel = static_cast<CHANNELINDEX>(undo.firstChannel + index);
+				const auto &previous = sndFile.ChnSettings[channel];
+				const auto &restored = undo.channelInfo[index];
+				auto &live = sndFile.m_PlayState.Chn[channel];
+				if(previous.nVolume != restored.nVolume)
+					live.nGlobalVol = restored.nVolume;
+				if(previous.nPan != restored.nPan || previous.dwFlags[CHN_SURROUND] != restored.dwFlags[CHN_SURROUND])
+				{
+					live.nPan = restored.nPan;
+					live.dwFlags.set(CHN_SURROUND, restored.dwFlags[CHN_SURROUND]);
+				}
+			}
 			std::move(undo.channelInfo.cbegin(), undo.channelInfo.cend(), std::begin(sndFile.ChnSettings) + undo.firstChannel);
 		}
 

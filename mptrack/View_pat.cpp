@@ -30,6 +30,7 @@
 #include "WindowMessages.h"
 #include "../common/misc_util.h"
 #include "../soundlib/MIDIEvents.h"
+#include "../soundlib/TrackRouting.h"
 #include "../soundlib/mod_specifications.h"
 #include "../soundlib/plugins/PlugInterface.h"
 
@@ -53,6 +54,7 @@ BEGIN_MESSAGE_MAP(CViewPattern, CModScrollView)
 	ON_WM_MOUSEWHEEL()
 	ON_WM_XBUTTONUP()
 	ON_WM_MOUSEMOVE()
+	ON_WM_CAPTURECHANGED()
 	ON_WM_LBUTTONDOWN()
 	ON_WM_LBUTTONDBLCLK()
 	ON_WM_LBUTTONUP()
@@ -86,6 +88,14 @@ BEGIN_MESSAGE_MAP(CViewPattern, CModScrollView)
 	ON_COMMAND(ID_PATTERN_CHNRESET,	&CViewPattern::OnChannelReset)
 	ON_COMMAND(ID_PATTERN_MUTE,		&CViewPattern::OnMuteFromClick)
 	ON_COMMAND(ID_PATTERN_SOLO,		&CViewPattern::OnSoloFromClick)
+	ON_COMMAND(ID_TRACK_AUTOMATION_PAN, &CViewPattern::OnPanAutomation)
+	ON_COMMAND(ID_TRACK_AUTOMATION_VOLUME, &CViewPattern::OnVolumeAutomation)
+	ON_COMMAND(ID_TRACK_WIDER_ALL, &CViewPattern::OnTracksWider)
+	ON_COMMAND(ID_TRACK_NARROWER_ALL, &CViewPattern::OnTracksNarrower)
+	ON_COMMAND(ID_TRACK_WIDER_SELECTED, &CViewPattern::OnTrackWider)
+	ON_COMMAND(ID_TRACK_NARROWER_SELECTED, &CViewPattern::OnTrackNarrower)
+	ON_COMMAND(ID_TRACK_INSTRUMENT, &CViewPattern::OnTrackInstrument)
+	ON_COMMAND(ID_TRACK_GROUP_OUTPUT, &CViewPattern::OnTrackGroupOutput)
 	ON_COMMAND(ID_PATTERN_TRANSITIONMUTE, &CViewPattern::OnTogglePendingMuteFromClick)
 	ON_COMMAND(ID_PATTERN_TRANSITIONSOLO, &CViewPattern::OnPendingSoloChnFromClick)
 	ON_COMMAND(ID_PATTERN_TRANSITION_UNMUTEALL, &CViewPattern::OnPendingUnmuteAllChnFromClick)
@@ -500,15 +510,11 @@ bool CViewPattern::UpdateScrollbarPositions(bool updateHorizontalScrollbar)
 		const CHANNELINDEX nchn = GetCurrentChannel();
 		if(nchn < xofs)
 		{
-			scroll.cx = (int)(xofs - nchn) * m_szCell.cx;
-			scroll.cx *= -1;
+			scroll.cx = GetTrackScrollPixel(nchn) - GetScrollPos(SB_HORZ);
 		} else if(nchn > xofs)
 		{
-			int maxcol = (rect.right - m_szHeader.cx) / m_szCell.cx;
-			if((nchn >= (xofs + maxcol)) && (maxcol >= 0))
-			{
-				scroll.cx = (int)(nchn - xofs - maxcol + 1) * m_szCell.cx;
-			}
+			if(GetTrackLeft(nchn) + GetTrackWidth(nchn) > rect.right)
+				scroll.cx = GetTrackScrollPixel(FirstTrackToFit(nchn, rect.right - m_szHeader.cx)) - GetScrollPos(SB_HORZ);
 		}
 	}
 	if(scroll.cx != 0 || scroll.cy != 0)
@@ -518,52 +524,148 @@ bool CViewPattern::UpdateScrollbarPositions(bool updateHorizontalScrollbar)
 	return true;
 }
 
+CRect CViewPattern::GetTrackControlRect(CHANNELINDEX channel, DragItem::DragType type) const
+{
+	const int left = GetTrackLeft(channel), width = GetNoteTrackWidth(channel);
+	const int nameHeight = MulDiv(TrackNameHeight, m_dpi, 96), rowHeight = MulDiv(TrackControlHeight, m_dpi, 96);
+	const int buttonWidth = std::min(MulDiv(20, m_dpi, 96), std::max(width / 4, 1));
+	CRect rect(left, 0, left + width, nameHeight);
+	switch(type)
+	{
+	case DragItem::ChannelMute: rect.top = nameHeight; rect.bottom += rowHeight; rect.right = left + buttonWidth; break;
+	case DragItem::ChannelSolo: rect.top = nameHeight; rect.bottom += rowHeight; rect.left += buttonWidth; rect.right = left + buttonWidth * 2; break;
+	case DragItem::ChannelRecord: rect.top = nameHeight; rect.bottom += rowHeight; rect.left += buttonWidth * 2; rect.right = left + buttonWidth * 3; break;
+	case DragItem::ChannelRouting: rect.top = nameHeight; rect.bottom += rowHeight; rect.left += buttonWidth * 3; break;
+	case DragItem::ChannelInstrument: rect.top = nameHeight + rowHeight; rect.bottom = rect.top + rowHeight; break;
+	case DragItem::ChannelVolume: case DragItem::VolumeLaneToggle: rect.top = nameHeight + rowHeight * 2; rect.bottom = rect.top + rowHeight; break;
+	case DragItem::ChannelPan: case DragItem::PanLaneToggle: rect.top = nameHeight + rowHeight * 3; rect.bottom = rect.top + rowHeight; break;
+	case DragItem::ChannelResize: rect.left = rect.right - MulDiv(4, m_dpi, 96); rect.bottom = m_szHeader.cy; break;
+	default: break;
+	}
+	if(type == DragItem::VolumeLaneToggle || type == DragItem::PanLaneToggle) rect.left = rect.right - MulDiv(12, m_dpi, 96);
+	return rect;
+}
+
+CRect CViewPattern::GetTrackSliderRect(CHANNELINDEX channel, DragItem::DragType type) const
+{
+	auto rect = GetTrackControlRect(channel, type);
+	rect.right -= MulDiv(12, m_dpi, 96);
+	const int padding = MulDiv(4, m_dpi, 96);
+	// Narrow pattern columns retain their width; labels collapse before the faders do.
+	if(rect.Width() >= MulDiv(76, m_dpi, 96))
+		rect.left += MulDiv(36, m_dpi, 96);
+	else if(rect.Width() >= MulDiv(44, m_dpi, 96))
+		rect.left += MulDiv(12, m_dpi, 96);
+	rect.DeflateRect(padding, 0);
+	return rect;
+}
+
+
+bool CViewPattern::IsTrackSolo(CHANNELINDEX channel) const
+{
+	const auto *file = GetSoundFile();
+	if(!file || channel >= file->GetNumChannels() || file->GetNumChannels() < 2) return false;
+	const auto audible = TrackSoloSet(file->ChnSettings, channel, channel);
+	bool hasMuted = false;
+	for(CHANNELINDEX other = 0; other < file->GetNumChannels(); other++)
+	{
+		const bool muted = file->ChnSettings[other].dwFlags[CHN_MUTE];
+		if(muted == audible[other]) return false;
+		hasMuted |= muted;
+	}
+	return hasMuted;
+}
+
+bool CViewPattern::CanEditTrackControl(DragItem::DragType type) const
+{
+	const auto *sndFile = GetSoundFile();
+	if(!sndFile) return false;
+	if(type == DragItem::ChannelVolume)
+		return static_cast<bool>(sndFile->GetType() & (MOD_TYPE_IT | MOD_TYPE_MPT));
+	if(type == DragItem::ChannelPan)
+		return static_cast<bool>(sndFile->GetType() & (MOD_TYPE_S3M | MOD_TYPE_IT | MOD_TYPE_MPT));
+	return false;
+}
+
+
+void CViewPattern::SetTrackSliderValue(int value)
+{
+	auto *doc = GetDocument();
+	const auto type = m_trackSlider.Type();
+	const auto channel = static_cast<CHANNELINDEX>(m_trackSlider.Value());
+	if(!doc || !m_trackSlider.IsValid() || channel >= doc->GetNumChannels() || !CanEditTrackControl(type))
+		return;
+	auto &settings = doc->GetSoundFile().ChnSettings[channel];
+	const bool volume = type == DragItem::ChannelVolume;
+	value = Clamp(value, 0, volume ? 64 : 256);
+	if(volume ? settings.nVolume == value : settings.nPan == value && !settings.dwFlags[CHN_SURROUND])
+		return;
+	if(!m_trackSliderUndo)
+	{
+		doc->GetPatternUndo().PrepareChannelUndo(channel, 1, volume ? "Track Volume" : "Track Pan");
+		m_trackSliderUndo = true;
+	}
+	if(volume)
+		doc->SetChannelGlobalVolume(channel, static_cast<uint16>(value));
+	else
+		doc->SetChannelDefaultPan(channel, static_cast<uint16>(value));
+	doc->UpdateAllViews(nullptr, GeneralHint(channel).Channels());
+}
+
+
+void CViewPattern::UpdateTrackSlider(CPoint point)
+{
+	const auto rect = GetTrackSliderRect(static_cast<CHANNELINDEX>(m_trackSlider.Value()), m_trackSlider.Type());
+	const int range = m_trackSlider.Type() == DragItem::ChannelVolume ? 64 : 256;
+	const int width = std::max(static_cast<int>(rect.Width()) - 1, 1);
+	SetTrackSliderValue(MulDiv(Clamp(static_cast<int>(point.x - rect.left), 0, width), range, width));
+}
+
+
+void CViewPattern::OnCaptureChanged(CWnd *wnd)
+{
+	m_trackSlider = {};
+	m_resizingTrack = CHANNELINDEX_INVALID;
+	m_trackSliderUndo = false;
+	m_automationDragging = false;
+	m_automationLastRow = -1;
+	CModScrollView::OnCaptureChanged(wnd);
+}
+
+
 DragItem CViewPattern::GetDragItem(CPoint point, RECT &outRect) const
 {
-	const CSoundFile *pSndFile = GetSoundFile();
-	if(pSndFile == nullptr)
-		return {};
-
-	CRect rcClient, rect, plugRect;
-
-	GetClientRect(&rcClient);
-	rect.SetRect(m_szHeader.cx, 0, m_szHeader.cx + GetChannelWidth(), m_szHeader.cy);
-	plugRect.SetRect(m_szHeader.cx, m_szHeader.cy - m_szPluginHeader.cy, m_szHeader.cx + GetChannelWidth(), m_szHeader.cy);
-
-	const auto xOffset = static_cast<CHANNELINDEX>(GetXScrollPos());
-	const CHANNELINDEX numChannels = pSndFile->GetNumChannels();
-
-	// Checking channel headers
-	if(m_Status[psShowPluginNames])
+	const auto *sndFile = GetSoundFile();
+	if(!sndFile) return {};
+	for(CHANNELINDEX channel = static_cast<CHANNELINDEX>(GetXScrollPos()); channel < sndFile->GetNumChannels(); channel++)
 	{
-		for(CHANNELINDEX n = xOffset; n < numChannels; n++)
+		for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
 		{
-			if(plugRect.PtInRect(point))
+			auto rect = GetAutomationRect(channel, lane);
+			if(rect.Width() > 0 && rect.PtInRect(point))
 			{
-				outRect = plugRect;
-				return {DragItem::PluginName, n};
+				outRect = rect;
+				if(point.y < m_szHeader.cy)
+					return {lane == AutomationLane::Pan ? DragItem::PanLaneToggle : DragItem::VolumeLaneToggle, channel};
+				return {lane == AutomationLane::Pan ? DragItem::PanLane : DragItem::VolumeLane, channel};
 			}
-			plugRect.OffsetRect(GetChannelWidth(), 0);
+		}
+		const int left = GetTrackLeft(channel);
+		if(m_Status[psShowPluginNames])
+		{
+			CRect rect(left, m_szHeader.cy - m_szPluginHeader.cy, left + GetNoteTrackWidth(channel), m_szHeader.cy);
+			if(rect.PtInRect(point)) { outRect = rect; return {DragItem::PluginName, channel}; }
+		}
+		for(auto type : {DragItem::ChannelResize, DragItem::ChannelMute, DragItem::ChannelSolo, DragItem::ChannelRecord, DragItem::ChannelInstrument, DragItem::ChannelRouting, DragItem::PanLaneToggle, DragItem::VolumeLaneToggle, DragItem::ChannelVolume, DragItem::ChannelPan, DragItem::ChannelHeader})
+		{
+			auto rect = GetTrackControlRect(channel, type);
+			if(rect.PtInRect(point)) { outRect = rect; return {type, channel}; }
 		}
 	}
-	for(CHANNELINDEX n = xOffset; n < numChannels; n++)
+	CRect corner(0, 0, m_szHeader.cx, m_szHeader.cy);
+	if(corner.PtInRect(point) && sndFile->Patterns.IsValidPat(m_nPattern))
 	{
-		if(rect.PtInRect(point))
-		{
-			outRect = rect;
-			return {DragItem::ChannelHeader, n};
-		}
-		rect.OffsetRect(GetChannelWidth(), 0);
-	}
-	if(pSndFile->Patterns.IsValidPat(m_nPattern) && (pSndFile->GetType() & (MOD_TYPE_XM | MOD_TYPE_IT | MOD_TYPE_MPT)))
-	{
-		// Clicking on upper-left corner with pattern number (for pattern properties)
-		rect.SetRect(0, 0, m_szHeader.cx, m_szHeader.cy);
-		if(rect.PtInRect(point))
-		{
-			outRect = rect;
-			return {DragItem::PatternHeader, 0};
-		}
+		outRect = corner; return {DragItem::PatternHeader, 0};
 	}
 	return {};
 }
@@ -619,21 +721,15 @@ bool CViewPattern::DragToSel(const PatternCursor &cursor, bool scrollHorizontal,
 	col = cursor.GetChannel();
 	if(scrollHorizontal && col < (int)pSndFile->GetNumChannels())
 	{
-		int maxcol = (rect.right - m_szHeader.cx) - 4;
-		maxcol -= GetColumnOffset(cursor.GetColumnType());
-		maxcol /= GetChannelWidth();
+		const auto channel = static_cast<CHANNELINDEX>(col);
 		if(col < xofs)
 		{
-			CSize size(-m_szCell.cx, 0);
-			if(!noMove)
-				size.cx = (col - xofs) * (int)m_szCell.cx;
-			OnScrollBy(size, TRUE);
-		} else if((col > xofs + maxcol) && (maxcol > 0))
+			const int target = noMove ? GetTrackScrollPixel(static_cast<CHANNELINDEX>(std::max(xofs - 1, 0))) : GetTrackScrollPixel(channel);
+			OnScrollBy(CSize(target - GetScrollPos(SB_HORZ), 0), TRUE);
+		} else if(GetTrackLeft(channel) + static_cast<int>(GetColumnOffset(cursor.GetColumnType())) >= rect.right - 4)
 		{
-			CSize size(m_szCell.cx, 0);
-			if(!noMove)
-				size.cx = (col - maxcol + 1) * (int)m_szCell.cx;
-			OnScrollBy(size, TRUE);
+			const int target = noMove ? GetTrackScrollPixel(static_cast<CHANNELINDEX>(xofs + 1)) : GetTrackScrollPixel(FirstTrackToFit(channel, rect.right - m_szHeader.cx - 4));
+			OnScrollBy(CSize(target - GetScrollPos(SB_HORZ), 0), TRUE);
 		}
 	}
 	UpdateWindow();
@@ -664,6 +760,9 @@ bool CViewPattern::SetPlayCursor(PATTERNINDEX pat, ROWINDEX row, uint32 tick)
 
 UINT CViewPattern::GetCurrentInstrument() const
 {
+	const auto *file = GetSoundFile();
+	if(file && GetCurrentChannel() < file->GetNumChannels() && file->ChnSettings[GetCurrentChannel()].trackInstrument)
+		return file->ChnSettings[GetCurrentChannel()].trackInstrument;
 	return static_cast<UINT>(SendCtrlMessage(CTRLMSG_GETCURRENTINSTRUMENT));
 }
 
@@ -697,6 +796,8 @@ bool CViewPattern::PrepareUndo(const PatternCursor &beginSel, const PatternCurso
 
 BOOL CViewPattern::PreTranslateMessage(MSG *pMsg)
 {
+	if(pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_ESCAPE && m_automationLinePending)
+	{ CancelAutomationLine(); return TRUE; }
 	if(pMsg)
 	{
 		//We handle keypresses before Windows has a chance to handle them (for alt etc..)
@@ -766,7 +867,7 @@ void CViewPattern::OnDestroy()
 	CModDoc *pModDoc = GetDocument();
 	if(pModDoc)
 	{
-		pModDoc->SetOldPatternScrollbarsPos(CSize(m_nXScroll * m_szCell.cx, m_nYScroll * m_szCell.cy));
+		pModDoc->SetOldPatternScrollbarsPos(CSize(GetTrackScrollPixel(static_cast<CHANNELINDEX>(m_nXScroll)), m_nYScroll * m_szCell.cy));
 	}
 	if(m_pEffectVis)
 	{
@@ -1141,7 +1242,51 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 	const auto &sndFile = modDoc->GetSoundFile();
 
 	SetFocus();
-	m_nDropItem = m_nDragItem = GetDragItem(point, m_rcDragItem);
+	const auto control = GetDragItem(point, m_rcDragItem);
+	m_automationContext = false;
+	if(control.Type() != DragItem::PanLane && control.Type() != DragItem::VolumeLane) CancelAutomationLine();
+	if(control.Type() == DragItem::ChannelResize)
+	{
+		m_resizingTrack = static_cast<CHANNELINDEX>(control.Value()); m_resizeStartX = point.x;
+		m_resizeStartWidth = GetNoteTrackWidth(m_resizingTrack); SetCapture(); return;
+	}
+	if(control.Type() == DragItem::ChannelInstrument) { ShowTrackInstrumentMenu(static_cast<CHANNELINDEX>(control.Value())); return; }
+	if(control.Type() == DragItem::ChannelRouting) { ShowTrackRoutingMenu(static_cast<CHANNELINDEX>(control.Value())); return; }
+	if(control.Type() == DragItem::PanLaneToggle || control.Type() == DragItem::VolumeLaneToggle)
+	{
+		m_nDragItem = m_nDropItem = {};
+		ToggleAutomationLane(static_cast<CHANNELINDEX>(control.Value()), control.Type() == DragItem::PanLaneToggle ? AutomationLane::Pan : AutomationLane::Volume);
+		return;
+	}
+	if(control.Type() == DragItem::PanLane || control.Type() == DragItem::VolumeLane)
+	{
+		if(!(nFlags & MK_SHIFT))
+		{
+			m_automationClick = true; m_nDragItem = m_nDropItem = {};
+			AutomationLineClick(static_cast<CHANNELINDEX>(control.Value()), control.Type() == DragItem::PanLane ? AutomationLane::Pan : AutomationLane::Volume, point);
+			return;
+		}
+		CancelAutomationLine();
+		m_nDragItem = m_nDropItem = {};
+		m_automationDragging = true; m_automationErasing = false; m_automationUndo = false; m_automationLastRow = -1;
+		m_automationLane = control.Type() == DragItem::PanLane ? AutomationLane::Pan : AutomationLane::Volume;
+		m_automationChannel = static_cast<CHANNELINDEX>(control.Value()); m_automationPattern = m_nPattern;
+		m_Cursor.SetColumn(m_automationChannel, m_Cursor.GetColumnType()); SetSelToCursor();
+		SetCapture(); UpdateAutomationStroke(point); return;
+	}
+	if(control.Type() == DragItem::ChannelVolume || control.Type() == DragItem::ChannelPan)
+	{
+		const auto sliderRect = GetTrackSliderRect(static_cast<CHANNELINDEX>(control.Value()), control.Type());
+		if(CanEditTrackControl(control.Type()) && sliderRect.PtInRect(point))
+		{
+			m_trackSlider = control;
+			m_trackSliderUndo = false;
+			SetCapture();
+			UpdateTrackSlider(point);
+		}
+		return;
+	}
+	m_nDropItem = m_nDragItem = control;
 	m_Status.set(psDragging);
 	m_bInItemRect = true;
 	m_Status.reset(psShiftDragging);
@@ -1150,7 +1295,7 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 
 	SetCapture();
 	const FlagSet<PatternSetup> patternSetup = TrackerSettings::Instance().patternSetup;
-	if(point.x >= m_szHeader.cx && point.y <= m_szHeader.cy - m_szPluginHeader.cy)
+	if(m_nDragItem.Type() == DragItem::ChannelHeader)
 	{
 		// Click on channel header
 		if(nFlags & MK_CONTROL)
@@ -1230,6 +1375,32 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 
 void CViewPattern::OnLButtonDblClk(UINT uFlags, CPoint point)
 {
+	CRect controlRect;
+	const auto control = GetDragItem(point, controlRect);
+	if(control.Type() == DragItem::ChannelHeader)
+	{
+		ClientToScreen(&point);
+		m_quickChannelProperties.Show(GetDocument(), static_cast<CHANNELINDEX>(control.Value()), point);
+		return;
+	}
+	if(control.Type() == DragItem::ChannelVolume || control.Type() == DragItem::ChannelPan)
+	{
+		m_trackSlider = control;
+		m_trackSliderUndo = false;
+		SetTrackSliderValue(control.Type() == DragItem::ChannelVolume ? 64 : 128);
+		m_trackSlider = {};
+		return;
+	}
+	if(control.Type() == DragItem::PanLane || control.Type() == DragItem::VolumeLane)
+	{
+		CancelAutomationLine();
+		EditAutomationNode(static_cast<CHANNELINDEX>(control.Value()), control.Type() == DragItem::PanLane ? AutomationLane::Pan : AutomationLane::Volume, point, true);
+		return;
+	}
+	if(control.Type() == DragItem::PanLaneToggle || control.Type() == DragItem::VolumeLaneToggle)
+	{
+		OnLButtonDown(uFlags, point); return;
+	}
 	PatternCursor cursor = GetPositionFromPoint(point);
 	if(cursor == m_Cursor && point.y >= m_szHeader.cy)
 	{
@@ -1252,6 +1423,16 @@ void CViewPattern::OnLButtonDblClk(UINT uFlags, CPoint point)
 
 void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 {
+	if(m_automationClick) { m_automationClick = false; return; }
+	if(m_resizingTrack != CHANNELINDEX_INVALID) { m_resizingTrack = CHANNELINDEX_INVALID; ReleaseCapture(); return; }
+	if(m_automationDragging) { UpdateAutomationStroke(point); EndAutomationStroke(); return; }
+	if(m_trackSlider.IsValid())
+	{
+		UpdateTrackSlider(point);
+		m_trackSlider = {};
+		ReleaseCapture();
+		return;
+	}
 	CModDoc *modDoc = GetDocument();
 	if(modDoc == nullptr)
 		return;
@@ -1281,6 +1462,9 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 		m_Status.reset(psDragnDropEdit);
 	}
 	if(dragType != DragItem::ChannelHeader
+	   && dragType != DragItem::ChannelMute
+	   && dragType != DragItem::ChannelSolo
+	   && dragType != DragItem::ChannelRecord
 	   && dragType != DragItem::PatternHeader
 	   && dragType != DragItem::PluginName)
 	{
@@ -1314,8 +1498,9 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 				OnSoloChannel(sourceChn, sourceChn);
 			} else if(!(nFlags & MK_CONTROL))
 			{
-				// Mute / Unmute
-				OnMuteChannel(sourceChn);
+				// Select the track; muting has its own button in the header.
+				SetCurrentColumn(sourceChn, m_Cursor.GetColumnType());
+				SetSelToCursor();
 			}
 		} else if(!wasDraggingRecordGroup && targetChn < modDoc->GetNumChannels() && m_nDropItem.Type() == DragItem::ChannelHeader)
 		{
@@ -1326,6 +1511,20 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 			const bool duplicate = (nFlags & MK_SHIFT) != 0;
 			DragChannel(sourceChn, targetChn, 1, duplicate);
 		}
+		break;
+
+	case DragItem::ChannelMute:
+		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels())
+			OnMuteChannel(sourceChn);
+		break;
+
+	case DragItem::ChannelRecord:
+		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels() && !GetSoundFile()->ChnSettings[sourceChn].isBus)
+		{ modDoc->ToggleChannelRecordGroup(sourceChn, RecordGroup::Group1); InvalidateChannelsHeaders(sourceChn); }
+		break;
+	case DragItem::ChannelSolo:
+		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels())
+			OnSoloChannel(sourceChn, sourceChn);
 		break;
 
 	case DragItem::PatternHeader:
@@ -1367,8 +1566,18 @@ void CViewPattern::DragChannel(CHANNELINDEX source, CHANNELINDEX target, CHANNEL
 			modified = true;
 		}
 	}
+	const auto previousStates = m_chnState;
 	if(modified && modDoc->ReArrangeChannels(channels) != CHANNELINDEX_INVALID)
 	{
+		m_chnState.resize(newChannels);
+		for(CHANNELINDEX channel = 0; channel < newChannels; channel++)
+		{
+			if(channels[channel] >= previousStates.size()) continue;
+			m_chnState[channel].panExpanded = previousStates[channels[channel]].panExpanded;
+			m_chnState[channel].volumeExpanded = previousStates[channels[channel]].volumeExpanded;
+			m_chnState[channel].widthDip = previousStates[channels[channel]].widthDip;
+		}
+		m_automationPresenceDirty = true;
 		modDoc->UpdateAllViews(this, GeneralHint().Channels().ModType(), this);
 		if(duplicate)
 		{
@@ -1417,6 +1626,24 @@ void CViewPattern::ShowPatternProperties(PATTERNINDEX pat)
 
 void CViewPattern::OnRButtonDown(UINT flags, CPoint pt)
 {
+	m_automationErasing = false;
+	CRect laneRect;
+	const auto lane = GetDragItem(pt, laneRect);
+	if(lane.Type() == DragItem::PanLane || lane.Type() == DragItem::VolumeLane)
+	{
+		if(!(flags & MK_SHIFT))
+		{
+			m_automationContext = true; CancelAutomationLine();
+			EditAutomationNode(static_cast<CHANNELINDEX>(lane.Value()), lane.Type() == DragItem::PanLane ? AutomationLane::Pan : AutomationLane::Volume, pt, false);
+			return;
+		}
+		CancelAutomationLine();
+		m_automationDragging = true; m_automationErasing = true; m_automationUndo = false; m_automationLastRow = -1;
+		m_automationLane = lane.Type() == DragItem::PanLane ? AutomationLane::Pan : AutomationLane::Volume;
+		m_automationChannel = static_cast<CHANNELINDEX>(lane.Value()); m_automationPattern = m_nPattern;
+		m_Cursor.SetColumn(m_automationChannel, m_Cursor.GetColumnType()); SetSelToCursor();
+		SetCapture(); UpdateAutomationStroke(pt); return;
+	}
 	// Abort drag n drop
 	if(m_Status[psDragnDropEdit])
 	{
@@ -1440,7 +1667,10 @@ void CViewPattern::OnRButtonDown(UINT flags, CPoint pt)
 	if(inChannelHeader)
 	{
 		// Drag-select record channels
-		StartRecordGroupDragging(GetDragItem(pt, m_rcDragItem));
+		const auto item = GetDragItem(pt, m_rcDragItem);
+		m_nDropItem = m_nDragItem = item;
+		if(item.Type() == DragItem::ChannelHeader)
+			StartRecordGroupDragging(item);
 		m_Status.set(psShiftDragging, (flags & MK_SHIFT) != 0);
 		m_bInItemRect = true;
 	}
@@ -1449,6 +1679,12 @@ void CViewPattern::OnRButtonDown(UINT flags, CPoint pt)
 
 void CViewPattern::OnRButtonUp(UINT flags, CPoint pt)
 {
+	if(m_automationContext) { m_automationContext = false; return; }
+	if(m_automationErasing)
+	{
+		if(m_automationDragging) UpdateAutomationStroke(pt);
+		EndAutomationStroke(); m_automationErasing = false; return;
+	}
 	CModDoc *modDoc = GetDocument();
 
 	// Too far left to get a ctx menu:
@@ -1592,10 +1828,10 @@ BOOL CViewPattern::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 {
 	if(nFlags & MK_CONTROL)
 	{
-		// Ctrl + mouse wheel: Increment / decrement values
-		DataEntry(zDelta > 0, (nFlags & MK_SHIFT) == MK_SHIFT);
+		ResizeTracks((zDelta > 0 ? 12 : -12), true);
 		return TRUE;
 	}
+	if(nFlags & MK_SHIFT) { ResizeTracks(zDelta > 0 ? 12 : -12, false); return TRUE; }
 	if(IsLiveRecord() && !m_Status[psDragActive])
 	{
 		// During live playback with "follow song" enabled, the mouse wheel can be used to jump forwards and backwards.
@@ -1624,10 +1860,43 @@ void CViewPattern::OnXButtonUp(UINT nFlags, UINT nButton, CPoint point)
 void CViewPattern::OnMouseMove(UINT nFlags, CPoint point)
 {
 	CModScrollView::OnMouseMove(nFlags, point);
+	if(m_automationLinePending && m_automationPattern == m_nPattern)
+	{
+		if(auto endpoint = AutomationPointFromMouse(m_automationChannel, m_automationLane, point))
+		{
+			m_lineEnd = *endpoint;
+			CMainFrame::GetMainFrame()->SetInfoText(MPT_CFORMAT("Click line end: row {}, value {}/64. Escape cancels; Shift draws freehand.")(endpoint->row, endpoint->value));
+			InvalidatePattern();
+		}
+		return;
+	}
+	if(m_resizingTrack != CHANNELINDEX_INVALID)
+	{
+		const int width = Clamp(m_resizeStartWidth + point.x - m_resizeStartX, GetChannelWidth(), MulDiv(640, m_dpi, 96));
+		m_chnState[m_resizingTrack].widthDip = MulDiv(width, 96, m_dpi);
+		UpdateScrollSize(); UpdateScrollPos(); InvalidatePattern(true, true); return;
+	}
+	if(m_automationDragging) { UpdateAutomationStroke(point); return; }
+	if(m_trackSlider.IsValid())
+	{
+		UpdateTrackSlider(point);
+		return;
+	}
 
 	const bool isDraggingRecordGroup = IsDraggingRecordGroup();
 	if(!m_Status[psDragging] && !isDraggingRecordGroup)
+	{
+		CRect controlRect; const auto control = GetDragItem(point, controlRect);
+		if(control.Type() == DragItem::ChannelResize) SetCursor(::LoadCursor(nullptr, IDC_SIZEWE));
+		if(control.Type() == DragItem::PanLane || control.Type() == DragItem::VolumeLane)
+		{
+			const auto lane = control.Type() == DragItem::PanLane ? AutomationLane::Pan : AutomationLane::Volume;
+			const auto nodes = GetAutomationNodes(static_cast<CHANNELINDEX>(control.Value()), lane);
+			const int index = FindAutomationNode(static_cast<CHANNELINDEX>(control.Value()), lane, point);
+			if(index >= 0) CMainFrame::GetMainFrame()->SetInfoText(MPT_CFORMAT("{} node: row {}, value {}/64. Right-click edits; double-click resets.")(lane == AutomationLane::Pan ? _T("Pan") : _T("Volume"), nodes[index].row, nodes[index].value));
+		}
 		return;
+	}
 
 	// Drag&Drop actions
 	if(m_nDragItem.IsValid())
@@ -1875,10 +2144,11 @@ void CViewPattern::OnSoloChannel(CHANNELINDEX first, CHANNELINDEX last)
 		return;
 	}
 
+	const auto audible = TrackSoloSet(GetSoundFile()->ChnSettings, first, last);
 	bool isAlreadySolo = true;
 	for(CHANNELINDEX i = 0; i < pModDoc->GetNumChannels(); i++)
 	{
-		if((i >= first && i <= last) == pModDoc->IsChannelMuted(i))
+		if(audible[i] == pModDoc->IsChannelMuted(i))
 		{
 			isAlreadySolo = false;
 			break;
@@ -1892,7 +2162,7 @@ void CViewPattern::OnSoloChannel(CHANNELINDEX first, CHANNELINDEX last)
 
 	for(CHANNELINDEX i = 0; i < pModDoc->GetNumChannels(); i++)
 	{
-		pModDoc->MuteChannel(i, i < first || i > last);
+		pModDoc->MuteChannel(i, !audible[i]);
 	}
 	InvalidateChannelsHeaders();
 	if(first == last)
@@ -4263,6 +4533,16 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 		if(lParam)
 		{
 			PatternViewState *pState = (PatternViewState *)lParam;
+			m_chnState.resize(GetDocument()->GetNumChannels());
+			for(size_t channel = 0; channel < std::min(m_chnState.size(), pState->automationLanes.size()); channel++)
+			{
+				m_chnState[channel].panExpanded = (pState->automationLanes[channel] & 1) != 0;
+				m_chnState[channel].volumeExpanded = (pState->automationLanes[channel] & 2) != 0;
+			}
+			m_defaultTrackWidth = std::min<int>(pState->defaultTrackWidth, 640);
+			for(size_t channel = 0; channel < std::min(m_chnState.size(), pState->trackWidths.size()); channel++)
+				m_chnState[channel].widthDip = std::min<int>(pState->trackWidths[channel], 640);
+			m_automationPresenceDirty = true; RefreshAutomationPresence();
 			if(pState->visibleColumns.any())
 				UpdateVisibileColumns(pState->visibleColumns);
 			if(pState->initialized)
@@ -4285,6 +4565,12 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 			pState->selection = m_Selection;
 			pState->nOrder = GetCurrentOrder();
 			pState->visibleColumns = m_visibleColumns;
+			pState->defaultTrackWidth = static_cast<uint16>(m_defaultTrackWidth);
+			pState->trackWidths.resize(m_chnState.size());
+			for(size_t channel = 0; channel < m_chnState.size(); channel++) pState->trackWidths[channel] = static_cast<uint16>(m_chnState[channel].widthDip);
+			pState->automationLanes.resize(m_chnState.size());
+			for(size_t channel = 0; channel < m_chnState.size(); channel++)
+				pState->automationLanes[channel] = (m_chnState[channel].panExpanded ? 1 : 0) | (m_chnState[channel].volumeExpanded ? 2 : 0);
 		}
 		break;
 
@@ -7637,7 +7923,46 @@ INT_PTR CViewPattern::OnToolHitTest(CPoint point, TOOLINFO *pTI) const
 				text = MPT_TFORMAT("{}: {}")(value + 1, mpt::ToWin(sndFile.GetCharsetInternal(), sndFile.ChnSettings[value].szName));
 			else
 				text = MPT_TFORMAT("Channel {}")(value + 1);
+			text += _T(". Double-click to edit name and color; drag to move track.");
 		}
+		break;
+	case DragItem::ChannelVolume:
+	case DragItem::ChannelPan:
+		if(value < sndFile.GetNumChannels())
+		{
+			if(!CanEditTrackControl(item.Type()))
+				text = _T("This module format does not store this channel setting");
+			else if(item.Type() == DragItem::ChannelVolume)
+				text = MPT_TFORMAT("Track volume: {} / 64. Drag to change; double-click to reset.")(sndFile.ChnSettings[value].nVolume);
+			else
+				text = MPT_TFORMAT("Track pan: {} / 256 (128 is center). Drag to change; double-click to center.")(sndFile.ChnSettings[value].nPan);
+		}
+		break;
+	case DragItem::ChannelMute:
+		text = _T("Mute / unmute track");
+		break;
+	case DragItem::ChannelRecord:
+		text = _T("Arm this track for step or MIDI note entry");
+		break;
+	case DragItem::ChannelInstrument:
+		text = _T("Choose the track instrument. Pattern mode keeps the instruments written in each row.");
+		break;
+	case DragItem::ChannelRouting:
+		text = _T("Choose a group output, or create a group from the selected tracks");
+		break;
+	case DragItem::ChannelResize:
+		text = _T("Drag to resize this track. Ctrl-wheel changes all widths; Shift-wheel changes the selected track.");
+		break;
+	case DragItem::ChannelSolo:
+		text = _T("Solo / unsolo track (keeps its group outputs audible)");
+		break;
+	case DragItem::PanLane:
+	case DragItem::VolumeLane:
+		text = _T("Click start and end to draw a line. Shift-drag draws freely; Shift-right-drag erases. Right-click a node to edit; double-click resets.");
+		break;
+	case DragItem::PanLaneToggle:
+	case DragItem::VolumeLaneToggle:
+		text = _T("Add, expand or collapse this track's automation lane");
 		break;
 	case DragItem::PluginName:
 		if(value < sndFile.GetNumChannels())
@@ -7700,11 +8025,553 @@ HRESULT CViewPattern::get_accName(VARIANT varChild, BSTR *pszName)
 	str.Replace(_T("%column_description%"), GetCursorDescription());
 	str.Replace(_T("%channel_name%"), channelName);
 
+	str += MPT_CFORMAT(", track width {}, {}")(GetNoteTrackWidth(chn), GetTrackInstrumentLabel(chn));
+	if(sndFile->ChnSettings[chn].isBus) str += _T(", group bus");
+	if(sndFile->ChnSettings[chn].parentBus < sndFile->GetNumChannels()) str += MPT_CFORMAT(", output group {}")(sndFile->ChnSettings[chn].parentBus + 1);
+	for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
+	{
+		if(GetAutomationWidth(chn, lane) == 0) continue;
+		if(str.IsEmpty()) str = MPT_CFORMAT("Track {}")(chn + 1);
+		int points = 0;
+		const auto &pattern = sndFile->Patterns[m_nPattern];
+		for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+			points += ReadAutomationValue(*pattern.GetpModCommand(row, chn), lane, GetAutomationFormat()).has_value() ? 1 : 0;
+		str += MPT_CFORMAT(", {} automation ({} points)")(lane == AutomationLane::Pan ? _T("Pan") : _T("Volume"), points);
+	}
 	if(str.IsEmpty())
 		return CModScrollView::get_accName(varChild, pszName);
 
 	*pszName = str.AllocSysString();
 	return S_OK;
+}
+
+int CViewPattern::GetAutomationWidth(CHANNELINDEX channel, AutomationLane lane) const
+{
+	if(channel >= m_chnState.size()) return 0;
+	const auto &state = m_chnState[channel];
+	const bool open = lane == AutomationLane::Pan ? state.hasPanAutomation && state.panExpanded : state.hasVolumeAutomation && state.volumeExpanded;
+	return open ? MulDiv(64, m_dpi, 96) : 0;
+}
+
+
+int CViewPattern::GetNoteTrackWidth(CHANNELINDEX channel) const
+{
+    const int dip = channel < m_chnState.size() && m_chnState[channel].widthDip ? m_chnState[channel].widthDip : m_defaultTrackWidth;
+    return std::max(GetChannelWidth(), MulDiv(Clamp(dip, 0, 640), m_dpi, 96));
+}
+
+void CViewPattern::ResizeTracks(int delta, bool allTracks)
+{
+    if(!GetSoundFile()) return;
+    m_chnState.resize(GetSoundFile()->GetNumChannels());
+    if(allTracks)
+    {
+        for(CHANNELINDEX channel = 0; channel < GetSoundFile()->GetNumChannels(); channel++)
+            m_chnState[channel].widthDip = Clamp(MulDiv(GetNoteTrackWidth(channel), 96, m_dpi) + delta, MulDiv(GetChannelWidth(), 96, m_dpi), 640);
+        m_defaultTrackWidth = m_chnState[GetCurrentChannel()].widthDip;
+    } else
+    {
+        auto &width = m_chnState[GetCurrentChannel()].widthDip;
+        width = Clamp(MulDiv(GetNoteTrackWidth(GetCurrentChannel()), 96, m_dpi) + delta, MulDiv(GetChannelWidth(), 96, m_dpi), 640);
+    }
+    UpdateScrollSize(); UpdateScrollPos(); SetCurrentColumn(m_Cursor); InvalidatePattern(true, true);
+}
+
+CString CViewPattern::GetTrackInstrumentLabel(CHANNELINDEX channel) const
+{
+    const auto &file = *GetSoundFile(); const auto &track = file.ChnSettings[channel];
+    if(track.isBus) return _T("Group bus");
+    uint16 instrument = track.trackInstrument;
+    const bool fromPattern = !instrument;
+    if(!instrument && file.Patterns.IsValidPat(m_nPattern))
+    {
+        const auto &pattern = file.Patterns[m_nPattern];
+        for(ROWINDEX row = std::min(GetCurrentRow() + 1, pattern.GetNumRows()); row > 0;)
+        {
+            const auto &cell = *pattern.GetpModCommand(--row, channel);
+            if(!cell.IsPcNote() && cell.instr) { instrument = cell.instr; break; }
+        }
+    }
+    if(!instrument && Order().IsValidPat(GetCurrentOrder()) && Order()[GetCurrentOrder()] == m_nPattern)
+        for(ORDERINDEX position = GetCurrentOrder(); position > 0 && !instrument;)
+        {
+            --position; if(!Order().IsValidPat(position)) continue;
+            const auto &pattern = file.Patterns[Order()[position]];
+            for(ROWINDEX row = pattern.GetNumRows(); row > 0;)
+            {
+                const auto &cell = *pattern.GetpModCommand(--row, channel);
+                if(!cell.IsPcNote() && cell.instr) { instrument = cell.instr; break; }
+            }
+        }
+    if(!instrument)
+        for(const auto &pattern : file.Patterns)
+        {
+            for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+            {
+                const auto &cell = *pattern.GetpModCommand(row, channel);
+                if(!cell.IsPcNote() && cell.instr) { instrument = cell.instr; break; }
+            }
+            if(instrument) break;
+        }
+    if(!instrument) return _T("Instrument: None");
+    const char *name = file.GetNumInstruments() ? file.GetInstrumentName(instrument) : file.GetSampleName(instrument);
+    return MPT_CFORMAT("{}{}: {}")(fromPattern ? _T("Pattern ") : _T(""), instrument, mpt::ToCString(file.GetCharsetInternal(), name));
+}
+
+void CViewPattern::ShowTrackInstrumentMenu(CHANNELINDEX channel)
+{
+    auto *doc = GetDocument(); auto &file = *GetSoundFile();
+    if(channel >= file.GetNumChannels() || file.ChnSettings[channel].isBus) return;
+    if(file.GetType() != MOD_TYPE_MPT)
+    { Reporting::Information(_T("Track instrument assignments are saved in MPTM songs. Change the song format to MPTM first.")); return; }
+    CMenu menu; menu.CreatePopupMenu();
+    menu.AppendMenu(MF_STRING | (!file.ChnSettings[channel].trackInstrument ? MF_CHECKED : 0), 1, _T("Use instruments written in the pattern"));
+    const auto count = std::min<uint16>(file.GetNumInstruments() ? file.GetNumInstruments() : file.GetNumSamples(), MAX_INSTRUMENTS - 1);
+    for(uint16 instrument = 1; instrument <= count; instrument++)
+    {
+        const char *name = file.GetNumInstruments() ? file.GetInstrumentName(instrument) : file.GetSampleName(instrument);
+        menu.AppendMenu(MF_STRING | (file.ChnSettings[channel].trackInstrument == instrument ? MF_CHECKED : 0), 1000 + instrument,
+            MPT_CFORMAT("{}: {}")(instrument, mpt::ToCString(file.GetCharsetInternal(), name)));
+    }
+    auto rect = GetTrackControlRect(channel, DragItem::ChannelInstrument); CPoint point(rect.left, rect.bottom); ClientToScreen(&point);
+    const auto chosen = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_LEFTALIGN | TPM_RIGHTBUTTON, point.x, point.y, this);
+    if(!chosen) return;
+    const auto instrument = static_cast<uint16>(chosen == 1 ? 0 : chosen - 1000);
+	if(file.ChnSettings[channel].parentBus != CHANNELINDEX_INVALID && !CanGroupTrack(channel, instrument))
+	{ Reporting::Information(_T("This instrument uses an external output. Route the track to Master before assigning it.")); return; }
+	doc->GetPatternUndo().PrepareChannelUndo(channel, 1, "Track Instrument");
+    { CriticalSection cs; file.ChnSettings[channel].trackInstrument = instrument; }
+    SetCurrentColumn(channel, m_Cursor.GetColumnType());
+    if(instrument) SendCtrlMessage(CTRLMSG_PAT_SETINSTRUMENT, instrument);
+    doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint(channel).Channels()); InvalidatePattern(true, true);
+}
+
+
+bool CViewPattern::CanGroupTrack(CHANNELINDEX channel, uint16 overrideInstrument) const
+{
+    const auto &file = *GetSoundFile();
+    if(file.ChnSettings[channel].isBus) return true;
+    if(file.ChnSettings[channel].nMixPlugin) return false;
+    auto supported = [&](uint16 instrument) {
+        if(!instrument) return true;
+        if(file.GetNumInstruments())
+        {
+            if(instrument > file.GetNumInstruments() || !file.Instruments[instrument]) return true;
+            const auto &ins = *file.Instruments[instrument];
+            if(ins.nMixPlug || ins.nMidiChannel) return false;
+            for(auto sample : ins.Keyboard)
+                if(sample <= file.GetNumSamples() && file.GetSample(sample).uFlags[CHN_ADLIB]) return false;
+            return true;
+        }
+        return instrument > file.GetNumSamples() || !file.GetSample(instrument).uFlags[CHN_ADLIB];
+    };
+    if(overrideInstrument) return supported(overrideInstrument);
+    if(file.ChnSettings[channel].trackInstrument) return supported(file.ChnSettings[channel].trackInstrument);
+    for(const auto &pattern : file.Patterns)
+        for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+        {
+            const auto &cell = *pattern.GetpModCommand(row, channel);
+            if(!cell.IsPcNote() && !supported(cell.instr)) return false;
+        }
+    return true;
+}
+
+void CViewPattern::ShowTrackRoutingMenu(CHANNELINDEX channel)
+{
+    auto *doc = GetDocument(); auto &file = *GetSoundFile();
+    if(channel >= file.GetNumChannels()) return;
+    if(file.GetType() != MOD_TYPE_MPT)
+    { Reporting::Information(_T("Group bus routing is saved in MPTM songs. Change the song format to MPTM first.")); return; }
+    CMenu menu; menu.CreatePopupMenu();
+    menu.AppendMenu(MF_STRING, 1, _T("Create group bus from selected tracks..."));
+    menu.AppendMenu(MF_SEPARATOR);
+    menu.AppendMenu(MF_STRING | (file.ChnSettings[channel].parentBus == CHANNELINDEX_INVALID ? MF_CHECKED : 0), 2, _T("Output: Master"));
+    for(CHANNELINDEX bus = 0; bus < file.GetNumChannels(); bus++)
+        if(file.ChnSettings[bus].isBus && bus != channel && !TrackBelongsToBus(file.ChnSettings, bus, channel))
+            menu.AppendMenu(MF_STRING | (file.ChnSettings[channel].parentBus == bus ? MF_CHECKED : 0), 1000 + bus,
+                MPT_CFORMAT("Output: {} ({})")(mpt::ToCString(file.GetCharsetInternal(), file.ChnSettings[bus].szName.buf), bus + 1));
+    auto rect = GetTrackControlRect(channel, DragItem::ChannelRouting); CPoint point(rect.left, rect.bottom); ClientToScreen(&point);
+    const auto chosen = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_LEFTALIGN | TPM_RIGHTBUTTON, point.x, point.y, this);
+    if(!chosen) return;
+    if(chosen == 1) { CreateGroupBus(); return; }
+	if(chosen != 2 && !CanGroupTrack(channel))
+	{ Reporting::Information(_T("Group buses currently support sample instruments. This track uses an external plugin, effect, MIDI output or FM instrument; keep its existing output routing.")); return; }
+	doc->GetPatternUndo().PrepareChannelUndo(channel, 1, "Track Routing");
+    { CriticalSection cs; file.ChnSettings[channel].parentBus = chosen == 2 ? CHANNELINDEX_INVALID : static_cast<CHANNELINDEX>(chosen - 1000); }
+    doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels()); InvalidatePattern(true, true);
+}
+
+void CViewPattern::CreateGroupBus()
+{
+    auto *doc = GetDocument(); auto &file = *GetSoundFile();
+    const auto first = m_Selection.GetStartChannel(), last = m_Selection.GetEndChannel();
+    const auto count = file.GetNumChannels();
+    if(first >= count || count >= file.GetModSpecifications().channelsMax) return;
+	for(CHANNELINDEX track = 0; track < count; track++)
+	{
+		bool selected = track >= first && track <= last;
+		for(CHANNELINDEX bus = first; bus <= last && bus < count; bus++)
+			if(file.ChnSettings[bus].isBus && TrackBelongsToBus(file.ChnSettings, track, bus)) selected = true;
+		if(selected && !CanGroupTrack(track))
+		{ Reporting::Information(_T("Group buses currently support sample instruments. One selected track uses an external plugin, effect, MIDI output or FM instrument.")); return; }
+	}
+	CInputDlg name(this, _T("Name for the new group bus:"), _T("Group"), MAX_CHANNELNAME - 1);
+    if(name.DoModal() != IDOK) return;
+    std::vector<CHANNELINDEX> order(count + 1);
+    for(CHANNELINDEX channel = 0; channel <= count; channel++) order[channel] = channel < first ? channel : channel == first ? CHANNELINDEX_INVALID : channel - 1;
+    if(doc->ReArrangeChannels(order) != count + 1) return;
+    {
+        CriticalSection cs;
+        auto &bus = file.ChnSettings[first]; bus.isBus = true;
+        bus.nVolume = 64; bus.nPan = 128;
+        bus.szName = mpt::ToCharset(file.GetCharsetInternal(), mpt::ToUnicode(name.resultAsString));
+        for(CHANNELINDEX channel = first + 1; channel <= std::min<CHANNELINDEX>(last + 1, count); channel++) file.ChnSettings[channel].parentBus = first;
+        doc->InitChannel(first);
+    }
+    m_chnState.insert(m_chnState.begin() + first, ChannelState{});
+    m_automationPresenceDirty = true;
+    doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels().ModType());
+    SetCurrentColumn(first, m_Cursor.GetColumnType()); SetSelToCursor(); UpdateScrollSize(); InvalidatePattern(true, true);
+}
+
+int CViewPattern::GetTrackWidth(CHANNELINDEX channel) const
+{
+	return GetNoteTrackWidth(channel) + GetAutomationWidth(channel, AutomationLane::Pan) + GetAutomationWidth(channel, AutomationLane::Volume);
+}
+
+int CViewPattern::GetTrackScrollPixel(CHANNELINDEX channel) const
+{
+	int pixel = 0;
+	for(CHANNELINDEX track = 0; track < channel; track++) pixel += GetTrackWidth(track);
+	return pixel;
+}
+
+CHANNELINDEX CViewPattern::GetTrackAtScrollPixel(int pixel) const
+{
+	const auto *sndFile = GetSoundFile();
+	CHANNELINDEX track = 0;
+	if(!sndFile) return track;
+	while(track + 1 < sndFile->GetNumChannels() && pixel > 0)
+	{
+		pixel -= GetTrackWidth(track);
+		track++;
+	}
+	return track;
+}
+
+int CViewPattern::GetTrackLeft(CHANNELINDEX channel) const
+{
+	return m_szHeader.cx + GetTrackScrollPixel(channel) - GetTrackScrollPixel(static_cast<CHANNELINDEX>(GetXScrollPos()));
+}
+
+CHANNELINDEX CViewPattern::FirstTrackToFit(CHANNELINDEX channel, int width) const
+{
+	int used = GetTrackWidth(channel);
+	while(channel > 0 && used + GetTrackWidth(channel - 1) <= width)
+		used += GetTrackWidth(--channel);
+	return channel;
+}
+
+CRect CViewPattern::GetAutomationRect(CHANNELINDEX channel, AutomationLane lane) const
+{
+	CRect client;
+	GetClientRect(client);
+	int left = GetTrackLeft(channel) + GetNoteTrackWidth(channel);
+	if(lane == AutomationLane::Volume) left += GetAutomationWidth(channel, AutomationLane::Pan);
+	int bottom = client.bottom;
+	if(GetSoundFile() && GetSoundFile()->Patterns.IsValidPat(m_nPattern))
+		bottom = std::min(bottom, static_cast<int>(m_szHeader.cy) + (static_cast<int>(GetSoundFile()->Patterns[m_nPattern].GetNumRows()) - GetYScrollPos() + static_cast<int>(m_nMidRow)) * GetRowHeight() - GetSmoothScrollOffset());
+	return CRect(left, 0, left + GetAutomationWidth(channel, lane), std::max(bottom, static_cast<int>(m_szHeader.cy)));
+}
+
+AutomationFormat CViewPattern::GetAutomationFormat() const
+{
+	AutomationFormat format;
+	if(const auto *sndFile = GetSoundFile())
+	{
+		const auto &spec = sndFile->GetModSpecifications();
+		format.channelVolume = spec.HasCommand(CMD_CHANNELVOLUME);
+		format.panEffect = spec.HasCommand(CMD_PANNING8);
+		format.panVolume = spec.HasVolCommand(VOLCMD_PANNING);
+		format.panEffectMax = sndFile->GetType() == MOD_TYPE_S3M ? 128 : 255;
+		format.panVolumeStep = sndFile->GetType() == MOD_TYPE_XM ? 4 : 1;
+	}
+	return format;
+}
+
+void CViewPattern::RefreshAutomationPresence()
+{
+	if(!m_automationPresenceDirty || !GetSoundFile()) return;
+	m_automationPresenceDirty = false;
+	const auto &sndFile = *GetSoundFile();
+	const auto channels = sndFile.GetNumChannels();
+	const int oldWidth = GetTrackScrollPixel(channels);
+	m_chnState.resize(channels);
+	for(auto &state : m_chnState) state.hasPanAutomation = state.hasVolumeAutomation = false;
+	const auto format = GetAutomationFormat();
+	for(PATTERNINDEX pat = 0; pat < sndFile.Patterns.Size(); pat++)
+	{
+		if(!sndFile.Patterns.IsValidPat(pat)) continue;
+		const auto &pattern = sndFile.Patterns[pat];
+		for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+		{
+			for(CHANNELINDEX channel = 0; channel < channels; channel++)
+			{
+				const auto &cell = *pattern.GetpModCommand(row, channel);
+				auto &state = m_chnState[channel];
+				state.hasPanAutomation |= ReadAutomationValue(cell, AutomationLane::Pan, format).has_value();
+				state.hasVolumeAutomation |= ReadAutomationValue(cell, AutomationLane::Volume, format).has_value();
+			}
+		}
+	}
+	if(oldWidth != GetTrackScrollPixel(channels))
+	{
+		UpdateScrollSize(); UpdateScrollPos(); InvalidatePattern(true, true);
+	}
+}
+
+void CViewPattern::ToggleAutomationLane(CHANNELINDEX channel, AutomationLane lane)
+{
+	CancelAutomationLine();
+	auto *doc = GetDocument();
+	if(!doc || channel >= doc->GetNumChannels() || !GetSoundFile()->Patterns.IsValidPat(m_nPattern)) return;
+	RefreshAutomationPresence();
+	auto &state = m_chnState[channel];
+	bool &expanded = lane == AutomationLane::Pan ? state.panExpanded : state.volumeExpanded;
+	const bool present = lane == AutomationLane::Pan ? state.hasPanAutomation : state.hasVolumeAutomation;
+	if(!present)
+	{
+		auto &pattern = GetSoundFile()->Patterns[m_nPattern];
+		const auto row = std::min(GetCurrentRow(), pattern.GetNumRows() - 1);
+		auto &cell = *pattern.GetpModCommand(row, channel);
+		auto next = cell;
+		const auto &settings = GetSoundFile()->ChnSettings[channel];
+		const int value = lane == AutomationLane::Pan ? settings.nPan / 4 : settings.nVolume;
+		const auto result = WriteAutomationValue(next, lane, value, GetAutomationFormat());
+		if(result == AutomationEdit::Blocked || result == AutomationEdit::Unsupported)
+		{
+			CMainFrame::GetMainFrame()->SetInfoText(result == AutomationEdit::Blocked
+				? _T("This row has another effect. Choose a free row to add automation.")
+				: _T("This module format cannot store this automation. Use IT or MPTM."));
+			return;
+		}
+		doc->GetPatternUndo().PrepareUndo(m_nPattern, channel, row, 1, 1, "Add Automation");
+		cell = next; doc->SetModified();
+		m_automationPresenceDirty = true;
+		RefreshAutomationPresence();
+		doc->UpdateAllViews(nullptr, PatternHint(m_nPattern).Data());
+		expanded = true;
+	} else expanded = !expanded;
+	UpdateScrollSize(); UpdateScrollPos();
+	SetCurrentColumn(channel, m_Cursor.GetColumnType());
+	UpdateScrollbarPositions(); InvalidatePattern(true, true);
+}
+
+
+int CViewPattern::GetAutomationInitialValue(CHANNELINDEX channel, AutomationLane lane) const
+{
+    const auto &file = *GetSoundFile(); const auto &order = Order();
+    const int initial = lane == AutomationLane::Pan ? file.ChnSettings[channel].nPan / 4 : file.ChnSettings[channel].nVolume;
+    if(!order.IsValidPat(GetCurrentOrder()) || order[GetCurrentOrder()] != m_nPattern) return initial;
+    for(ORDERINDEX position = GetCurrentOrder(); position > 0;)
+    {
+        --position; if(!order.IsValidPat(position)) continue;
+        const auto &pattern = file.Patterns[order[position]];
+        for(ROWINDEX row = pattern.GetNumRows(); row > 0;)
+            if(auto value = ReadAutomationValue(*pattern.GetpModCommand(--row, channel), lane, GetAutomationFormat())) return *value;
+    }
+    return initial;
+}
+
+std::vector<AutomationNode> CViewPattern::GetAutomationNodes(CHANNELINDEX channel, AutomationLane lane) const
+{
+    const auto &pattern = GetSoundFile()->Patterns[m_nPattern];
+    std::vector<std::optional<int>> points(pattern.GetNumRows());
+    for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++) points[row] = ReadAutomationValue(*pattern.GetpModCommand(row, channel), lane, GetAutomationFormat());
+    return ReduceAutomationNodes(points, GetAutomationInitialValue(channel, lane), std::max(1, GetAutomationFormat().panVolumeStep / 2));
+}
+
+std::optional<AutomationNode> CViewPattern::AutomationPointFromMouse(CHANNELINDEX channel, AutomationLane lane, CPoint point) const
+{
+    if(!GetSoundFile()->Patterns.IsValidPat(m_nPattern)) return std::nullopt;
+    const auto rect = GetAutomationRect(channel, lane);
+    if(rect.Width() <= 0 || point.y < m_szHeader.cy || point.y >= rect.bottom) return std::nullopt;
+    const int row = GetYScrollPos() - static_cast<int>(m_nMidRow) + (point.y - m_szHeader.cy + GetSmoothScrollOffset()) / GetRowHeight();
+    if(row < 0 || row >= static_cast<int>(GetSoundFile()->Patterns[m_nPattern].GetNumRows())) return std::nullopt;
+    const int pad = MulDiv(5, m_dpi, 96), width = std::max(1, static_cast<int>(rect.Width()) - pad * 2 - 1);
+    return AutomationNode{row, MulDiv(Clamp(static_cast<int>(point.x - rect.left) - pad, 0, width), 64, width)};
+}
+
+CPoint CViewPattern::AutomationNodePosition(CHANNELINDEX channel, AutomationLane lane, AutomationNode point) const
+{
+    const auto rect = GetAutomationRect(channel, lane); const int pad = MulDiv(5, m_dpi, 96);
+    return CPoint(rect.left + pad + MulDiv(point.value, std::max(1, static_cast<int>(rect.Width()) - pad * 2 - 1), 64),
+        m_szHeader.cy + (point.row - GetYScrollPos() + static_cast<int>(m_nMidRow)) * GetRowHeight() - GetSmoothScrollOffset() + GetRowHeight() / 2);
+}
+
+int CViewPattern::FindAutomationNode(CHANNELINDEX channel, AutomationLane lane, CPoint point) const
+{
+    const auto nodes = GetAutomationNodes(channel, lane); int best = -1, distance = MulDiv(8, m_dpi, 96); distance *= distance;
+    for(size_t index = 0; index < nodes.size(); index++)
+    {
+        const auto delta = AutomationNodePosition(channel, lane, nodes[index]) - point;
+        if(std::abs(delta.cx) > MulDiv(8, m_dpi, 96) || std::abs(delta.cy) > MulDiv(8, m_dpi, 96)) continue;
+        const int squared = delta.cx * delta.cx + delta.cy * delta.cy;
+        if(squared <= distance) { best = static_cast<int>(index); distance = squared; }
+    }
+    return best;
+}
+
+void CViewPattern::CancelAutomationLine()
+{
+    if(!m_automationLinePending) return;
+    m_automationLinePending = false; InvalidatePattern();
+}
+
+void CViewPattern::AutomationLineClick(CHANNELINDEX channel, AutomationLane lane, CPoint point)
+{
+    auto endpoint = AutomationPointFromMouse(channel, lane, point); if(!endpoint) return;
+    const auto nodes = GetAutomationNodes(channel, lane);
+    if(const int node = FindAutomationNode(channel, lane, point); node >= 0) endpoint = nodes[node];
+    if(m_automationLinePending && m_automationPattern == m_nPattern && m_automationChannel == channel && m_automationLane == lane)
+    {
+        const auto start = m_lineStart; m_automationLinePending = false;
+        if(start.row <= endpoint->row) WriteAutomationSegment(channel, lane, {start, *endpoint});
+        else WriteAutomationSegment(channel, lane, {*endpoint, start});
+        InvalidatePattern(); return;
+    }
+    m_automationChannel = channel; m_automationPattern = m_nPattern; m_automationLane = lane;
+    m_lineStart = m_lineEnd = *endpoint; m_automationLinePending = true;
+    m_Cursor.SetColumn(channel, m_Cursor.GetColumnType()); SetSelToCursor();
+    CMainFrame::GetMainFrame()->SetInfoText(_T("Click the end of the automation line. Escape cancels; Shift draws freehand."));
+    InvalidatePattern();
+}
+
+void CViewPattern::WriteAutomationSegment(CHANNELINDEX channel, AutomationLane lane, const std::vector<AutomationNode> &nodes, int eraseFrom, int eraseTo)
+{
+    auto *doc = GetDocument();
+    if(nodes.empty() && eraseFrom < 0) return;
+    CriticalSection cs;
+    auto &pattern = GetSoundFile()->Patterns[m_nPattern];
+    const int first = eraseFrom >= 0 ? eraseFrom : nodes.front().row;
+    const int last = eraseTo >= 0 ? eraseTo : nodes.back().row;
+    bool changed = false, blocked = false, undo = false;
+    size_t segment = 0;
+    for(int row = first; row <= last && row < static_cast<int>(pattern.GetNumRows()); row++)
+    {
+        if(row < 0) continue;
+        auto &cell = *pattern.GetpModCommand(static_cast<ROWINDEX>(row), channel); auto next = cell;
+        AutomationEdit result = AutomationEdit::Unchanged;
+        if(eraseFrom >= 0) result = EraseAutomationValue(next, lane, GetAutomationFormat());
+        if(!nodes.empty() && row >= nodes.front().row && row <= nodes.back().row)
+        {
+            while(segment + 1 < nodes.size() && row > nodes[segment + 1].row) segment++;
+            const auto end = nodes[std::min(segment + 1, nodes.size() - 1)];
+            result = WriteAutomationValue(next, lane, AutomationLineValue(nodes[segment], end, row), GetAutomationFormat());
+        }
+        blocked |= result == AutomationEdit::Blocked || result == AutomationEdit::Unsupported;
+        if(next == cell) continue;
+        if(!undo) { doc->GetPatternUndo().PrepareUndo(m_nPattern, channel, 0, 1, pattern.GetNumRows(), "Edit Automation Line"); undo = true; }
+        cell = next; changed = true;
+    }
+    cs.Leave();
+    if(changed)
+    {
+        doc->SetModified(); m_automationPresenceDirty = true; RefreshAutomationPresence();
+        doc->UpdateAllViews(nullptr, PatternHint(m_nPattern).Data()); InvalidatePattern(true, true);
+    }
+    CMainFrame::GetMainFrame()->SetInfoText(blocked ? _T("Automation updated. Rows with other effects were kept unchanged.") : _T("Automation updated. Right-click a node to edit its value; double-click resets it."));
+}
+
+void CViewPattern::EditAutomationNode(CHANNELINDEX channel, AutomationLane lane, CPoint point, bool reset)
+{
+    auto nodes = GetAutomationNodes(channel, lane); const int index = FindAutomationNode(channel, lane, point);
+    if(index < 0) return;
+    bool remove = false;
+    if(reset) nodes[index].value = lane == AutomationLane::Pan ? 32 : 64;
+    else
+    {
+        CMenu menu; menu.CreatePopupMenu();
+        menu.AppendMenu(MF_STRING, 1, MPT_CFORMAT("Edit value... ({}/64)")(nodes[index].value));
+        menu.AppendMenu(MF_STRING, 2, lane == AutomationLane::Pan ? _T("Reset to center (32)") : _T("Reset to unity (64)"));
+        menu.AppendMenu(MF_STRING, 3, _T("Delete node"));
+        ClientToScreen(&point);
+        const auto chosen = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_LEFTALIGN | TPM_RIGHTBUTTON, point.x, point.y, this);
+        if(!chosen) return;
+        if(chosen == 1)
+        {
+            CInputDlg value(this, lane == AutomationLane::Pan ? _T("Pan value: 0 = left, 32 = center, 64 = right") : _T("Volume: 0 = silence, 64 = unity (0 dB)"), 0, 64, nodes[index].value);
+            if(value.DoModal() != IDOK) return;
+            nodes[index].value = value.resultAsInt;
+        } else if(chosen == 2) nodes[index].value = lane == AutomationLane::Pan ? 32 : 64;
+        else remove = true;
+    }
+    const int first = nodes[index ? index - 1 : index].row;
+    const int last = nodes[index + 1 < static_cast<int>(nodes.size()) ? index + 1 : index].row;
+    const int from = std::max(0, index - 1), to = std::min(static_cast<int>(nodes.size()) - 1, index + 1);
+    std::vector<AutomationNode> local(nodes.begin() + from, nodes.begin() + to + 1);
+    if(remove) local.erase(local.begin() + index - from);
+    WriteAutomationSegment(channel, lane, local, remove ? first : -1, remove ? last : -1);
+}
+
+void CViewPattern::EndAutomationStroke()
+{
+	m_automationDragging = false;
+	m_automationLastRow = -1;
+	if(GetCapture() == this) ReleaseCapture();
+}
+
+void CViewPattern::UpdateAutomationStroke(CPoint point)
+{
+	auto *doc = GetDocument();
+	if(!m_automationDragging || !doc || m_automationPattern != m_nPattern
+		|| !GetSoundFile()->Patterns.IsValidPat(m_nPattern) || m_automationChannel >= doc->GetNumChannels()) return;
+	CriticalSection cs;
+	auto &pattern = GetSoundFile()->Patterns[m_nPattern];
+	const auto rect = GetAutomationRect(m_automationChannel, m_automationLane);
+	if(rect.Width() == 0) { EndAutomationStroke(); return; }
+	const int row = GetYScrollPos() - static_cast<int>(m_nMidRow) + (point.y - m_szHeader.cy + GetSmoothScrollOffset()) / GetRowHeight();
+	if(point.y < m_szHeader.cy || row < 0 || row >= static_cast<int>(pattern.GetNumRows())) return;
+	const int padding = MulDiv(5, m_dpi, 96);
+	const int width = std::max(static_cast<int>(rect.Width()) - padding * 2 - 1, 1);
+	const int value = MulDiv(Clamp(static_cast<int>(point.x - rect.left) - padding, 0, width), 64, width);
+	const int start = m_automationLastRow < 0 ? row : m_automationLastRow;
+	const int startValue = m_automationLastRow < 0 ? value : m_automationLastValue;
+	const int distance = std::abs(row - start);
+	const int direction = row >= start ? 1 : -1;
+	const auto format = GetAutomationFormat();
+	bool changed = false, blocked = false;
+	for(int step = 0; step <= distance; step++)
+	{
+		auto &cell = *pattern.GetpModCommand(static_cast<ROWINDEX>(start + step * direction), m_automationChannel);
+		auto next = cell;
+		const int interpolated = startValue + MulDiv(value - startValue, step, std::max(distance, 1));
+		const auto result = m_automationErasing ? EraseAutomationValue(next, m_automationLane, format) : WriteAutomationValue(next, m_automationLane, interpolated, format);
+		blocked |= result == AutomationEdit::Blocked || result == AutomationEdit::Unsupported;
+		if(result != AutomationEdit::Changed) continue;
+		if(!m_automationUndo)
+		{
+			doc->GetPatternUndo().PrepareUndo(m_nPattern, m_automationChannel, 0, 1, pattern.GetNumRows(), m_automationErasing ? "Erase Automation" : "Draw Automation");
+			m_automationUndo = true;
+		}
+		cell = next; changed = true;
+	}
+	m_automationLastRow = row; m_automationLastValue = value;
+	cs.Leave();
+	if(changed)
+	{
+		doc->SetModified(); m_automationPresenceDirty = true;
+		RefreshAutomationPresence();
+		doc->UpdateAllViews(nullptr, PatternHint(m_nPattern).Data());
+		InvalidatePattern(true, true);
+	}
+	CString info;
+	if(m_automationErasing)
+		info.Format(_T("Erase %s automation: row %d"), m_automationLane == AutomationLane::Pan ? _T("Pan") : _T("Volume"), row);
+	else
+		info.Format(_T("%s automation: row %d, value %d/64"), m_automationLane == AutomationLane::Pan ? _T("Pan") : _T("Volume"), row, value);
+	if(blocked) info += _T(". Rows with other effects were kept unchanged.");
+	CMainFrame::GetMainFrame()->SetInfoText(info);
 }
 
 OPENMPT_NAMESPACE_END

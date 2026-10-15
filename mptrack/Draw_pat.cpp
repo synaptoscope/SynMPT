@@ -123,7 +123,7 @@ bool CViewPattern::UpdateSizes()
 	const PATTERNFONT *pfnt = PatternFont::currentFont;
 	int oldx = m_szCell.cx, oldy = m_szCell.cy;
 	m_szHeader.cx = ROWHDR_WIDTH;
-	m_szHeader.cy = COLHDR_HEIGHT;
+	m_szHeader.cy = TrackNameHeight + TrackControlHeight * 4;
 	m_szPluginHeader.cx = 0;
 	m_szPluginHeader.cy = m_Status[psShowPluginNames] ? MulDiv(PLUGNAME_HEIGHT, m_dpi, 96) : 0;
 	if(m_Status[psShowVUMeters]) m_szHeader.cy += VUMETERS_HEIGHT;
@@ -183,6 +183,7 @@ int CViewPattern::GetSmoothScrollOffset() const
 
 void CViewPattern::UpdateView(UpdateHint hint, CObject *pObj)
 {
+	if(hint.GetType()[HINT_PATTERNDATA | HINT_PATTERNROW | HINT_UNDO | HINT_MODTYPE | HINT_MODCHANNELS]) m_automationPresenceDirty = true;
 	if(pObj == this)
 	{
 		return;
@@ -199,7 +200,7 @@ void CViewPattern::UpdateView(UpdateHint hint, CObject *pObj)
 	const auto generalHint = hint.ToType<GeneralHint>();
 	if(generalHint.GetType()[HINT_MODTYPE | HINT_MODCHANNELS])
 	{
-		InvalidateChannelsHeaders();
+		InvalidatePattern(true, true);
 		UpdateScrollSize();
 	}
 	if(generalHint.GetType()[HINT_MODTYPE])
@@ -246,7 +247,7 @@ POINT CViewPattern::GetPointFromPosition(PatternCursor cursor) const
 
 	PatternCursor::Columns imax = cursor.GetColumnType();
 	LimitMax(imax, PatternCursor::lastColumn);
-	pt.x = (cursor.GetChannel() - xofs) * GetChannelWidth();
+	pt.x = GetTrackScrollPixel(cursor.GetChannel()) - GetTrackScrollPixel(static_cast<CHANNELINDEX>(xofs));
 
 	for(int i = 0; i < imax; i++)
 	{
@@ -271,12 +272,14 @@ PatternCursor CViewPattern::GetPositionFromPoint(POINT pt) const
 	const PATTERNFONT *pfnt = PatternFont::currentFont;
 	int xofs = GetXScrollPos();
 	int yofs = GetYScrollPos();
-	int x = xofs + (pt.x - m_szHeader.cx) / GetChannelWidth();
-	if (pt.x < m_szHeader.cx) x = (xofs) ? xofs - 1 : 0;
+	int x = xofs;
+	const int channels = GetSoundFile() ? GetSoundFile()->GetNumChannels() : 0;
+	while(x < channels && pt.x >= GetTrackLeft(static_cast<CHANNELINDEX>(x)) + GetTrackWidth(static_cast<CHANNELINDEX>(x))) x++;
+	if(pt.x < m_szHeader.cx) x = xofs ? xofs - 1 : 0;
 
 	int y = yofs - m_nMidRow + (pt.y - m_szHeader.cy + GetSmoothScrollOffset()) / m_szCell.cy;
 	if (y < 0) y = 0;
-	int xx = (pt.x - m_szHeader.cx) % GetChannelWidth(), dx = 0;
+	int xx = Clamp(static_cast<int>(pt.x) - GetTrackLeft(static_cast<CHANNELINDEX>(x)), 0, GetChannelWidth() - 1), dx = 0;
 	size_t i = 0;
 	for(; i < PatternCursor::lastColumn; i++)
 	{
@@ -526,6 +529,190 @@ void CViewPattern::DrawVolumeCommand(int x, int y, const ModCommand &mc, std::op
 }
 
 
+void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth)
+{
+	const auto &settings = GetSoundFile()->ChnSettings[channel];
+	auto muteRect = GetTrackControlRect(channel, DragItem::ChannelMute);
+	DrawButtonRect(dc, lineWidth, muteRect, "M", false,
+		settings.dwFlags[CHN_MUTE] || (m_bInItemRect && m_nDragItem == DragItem(DragItem::ChannelMute, channel)));
+	auto soloRect = GetTrackControlRect(channel, DragItem::ChannelSolo);
+	const bool solo = IsTrackSolo(channel);
+	DrawButtonRect(dc, lineWidth, soloRect, "", false,
+		solo || (m_bInItemRect && m_nDragItem == DragItem(DragItem::ChannelSolo, channel)));
+	const auto oldSoloFont = ::SelectObject(dc, CMainFrame::GetGUIFont());
+	const auto oldSoloColor = ::SetTextColor(dc, solo ? RGB(176, 36, 36) : GetSysColor(COLOR_BTNTEXT));
+	const int oldSoloMode = ::SetBkMode(dc, TRANSPARENT);
+	::DrawTextA(dc, "S", 1, &soloRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	::SetBkMode(dc, oldSoloMode);
+	::SetTextColor(dc, oldSoloColor);
+	::SelectObject(dc, oldSoloFont);
+	const auto record = GetDocument()->GetChannelRecordGroup(channel);
+	auto recordRect = GetTrackControlRect(channel, DragItem::ChannelRecord);
+	DrawButtonRect(dc, lineWidth, recordRect, "R", settings.isBus, record != RecordGroup::NoGroup);
+	auto routeRect = GetTrackControlRect(channel, DragItem::ChannelRouting);
+	CString route = settings.isBus ? _T("Bus") : _T("Out");
+	if(settings.parentBus < GetSoundFile()->GetNumChannels()) route = mpt::ToCString(GetSoundFile()->GetCharsetInternal(), GetSoundFile()->ChnSettings[settings.parentBus].szName.buf);
+	DrawButtonRect(dc, lineWidth, routeRect, route.GetString());
+	auto instrumentRect = GetTrackControlRect(channel, DragItem::ChannelInstrument);
+	DrawButtonRect(dc, lineWidth, instrumentRect, GetTrackInstrumentLabel(channel).GetString(), settings.isBus);
+	const auto brush = GetStockBrush(DC_BRUSH);
+	const auto oldFont = ::SelectObject(dc, CMainFrame::GetGUIFont());
+	const int oldMode = ::SetBkMode(dc, TRANSPARENT);
+	const auto oldColor = ::GetTextColor(dc);
+	const int padding = MulDiv(3, m_dpi, 96);
+	for(auto type : {DragItem::ChannelVolume, DragItem::ChannelPan})
+	{
+		auto row = GetTrackControlRect(channel, type);
+		DrawButtonRect(dc, lineWidth, row, "");
+		auto slider = GetTrackSliderRect(channel, type);
+		const bool enabled = CanEditTrackControl(type);
+		const bool volume = type == DragItem::ChannelVolume;
+		const int value = volume ? settings.nVolume : settings.nPan;
+		const int range = volume ? 64 : 256;
+		const auto color = GetSysColor(enabled ? COLOR_BTNTEXT : COLOR_GRAYTEXT);
+		::SetTextColor(dc, color);
+		if(slider.left - row.left >= MulDiv(12, m_dpi, 96))
+		{
+			char label[16];
+			if(slider.left - row.left >= MulDiv(32, m_dpi, 96))
+				sprintf(label, "%c%u", volume ? 'V' : 'P', value);
+			else
+				sprintf(label, "%c", volume ? 'V' : 'P');
+			auto labelRect = row;
+			labelRect.left += padding;
+			labelRect.right = slider.left - padding;
+			::DrawTextA(dc, label, -1, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+		}
+		const int middle = (slider.top + slider.bottom) / 2;
+		CRect rail(slider.left, middle - lineWidth, slider.right, middle + lineWidth);
+		::SetDCBrushColor(dc, GetSysColor(COLOR_BTNSHADOW));
+		::FillRect(dc, rail, brush);
+		if(!volume)
+		{
+			const int center = (slider.left + slider.right) / 2;
+			CRect tick(center, middle - padding, center + lineWidth, middle + padding);
+			::FillRect(dc, tick, brush);
+		}
+		const int knobX = slider.left + MulDiv(value, std::max(static_cast<int>(slider.Width()) - 1, 1), range);
+		CRect knob(knobX - lineWidth, row.top + padding, knobX + lineWidth * 2, row.bottom - padding);
+		::SetDCBrushColor(dc, color);
+		::FillRect(dc, knob, brush);
+	}
+	for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
+	{
+		const auto type = lane == AutomationLane::Pan ? DragItem::PanLaneToggle : DragItem::VolumeLaneToggle;
+		auto toggle = GetTrackControlRect(channel,type);
+		const auto &state = m_chnState[channel];
+		const bool present = lane == AutomationLane::Pan ? state.hasPanAutomation : state.hasVolumeAutomation;
+		DrawButtonRect(dc,lineWidth,toggle,!present ? "+" : GetAutomationWidth(channel,lane) ? "<" : ">");
+	}
+	::SetTextColor(dc, oldColor);
+	::SetBkMode(dc, oldMode);
+	::SelectObject(dc, oldFont);
+}
+
+
+void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
+{
+	const auto *file = GetSoundFile();
+	if(!file || !file->Patterns.IsValidPat(m_nPattern)) return;
+	const auto &pattern = file->Patterns[m_nPattern];
+	const auto format = GetAutomationFormat();
+	CRect client; GetClientRect(client);
+	const int pad = MulDiv(5, m_dpi, 96), node = std::max(lineWidth, 1);
+	const auto oldPen = ::SelectObject(dc, GetStockObject(DC_PEN));
+	const auto oldBrush = ::SelectObject(dc, GetStockObject(DC_BRUSH));
+	for(CHANNELINDEX channel = static_cast<CHANNELINDEX>(GetXScrollPos()); channel < file->GetNumChannels(); channel++)
+	{
+		if(GetTrackLeft(channel) >= client.right) break;
+		for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
+		{
+			auto rect = GetAutomationRect(channel, lane);
+			if(rect.Width() <= 0 || rect.left >= client.right) continue;
+			const bool pan = lane == AutomationLane::Pan;
+			const COLORREF color = pan ? RGB(204,112,34) : RGB(36,142,76);
+			const COLORREF background = pan ? RGB(247,238,224) : RGB(230,242,232);
+			if(headers)
+			{
+				rect.bottom = m_szHeader.cy;
+				::SetDCBrushColor(dc, background); ::FillRect(dc, rect, GetStockBrush(DC_BRUSH));
+				const auto owner = file->ChnSettings[channel].color;
+				::SetDCPenColor(dc, owner == ModChannelSettings::INVALID_COLOR ? GetSysColor(COLOR_BTNSHADOW) : owner);
+				const int top = MulDiv(TrackNameHeight, m_dpi, 96);
+				::MoveToEx(dc, rect.left, top, nullptr); ::LineTo(dc, rect.right - 1, top);
+				rect.top = std::max(0, static_cast<int>(m_szHeader.cy) - MulDiv(22, m_dpi, 96));
+				DrawButtonRect(dc, lineWidth, rect, pan ? "Pan <" : "Volume <");
+				continue;
+			}
+			rect.top = m_szHeader.cy;
+			const int saved = ::SaveDC(dc);
+			::IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
+			::SetDCBrushColor(dc, background); ::FillRect(dc, rect, GetStockBrush(DC_BRUSH));
+			::SetDCPenColor(dc, GetSysColor(COLOR_BTNSHADOW));
+			::MoveToEx(dc, rect.left, rect.top, nullptr); ::LineTo(dc, rect.left, rect.bottom);
+			::MoveToEx(dc, rect.right - 1, rect.top, nullptr); ::LineTo(dc, rect.right - 1, rect.bottom);
+			const int width = std::max(static_cast<int>(rect.Width()) - pad * 2 - 1, 1);
+			if(pan) { const int x = rect.left + pad + width / 2; ::MoveToEx(dc,x,rect.top,nullptr); ::LineTo(dc,x,rect.bottom); }
+			int value = GetAutomationInitialValue(channel, lane);
+			int lastX = rect.left + pad + MulDiv(Clamp(value,0,64),width,64), lastY = rect.top;
+			for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+			{
+				const auto &cell = *pattern.GetpModCommand(row,channel);
+				const auto point = ReadAutomationValue(cell,lane,format);
+				if(point) value = *point;
+				const int x = rect.left + pad + MulDiv(Clamp(value,0,64),width,64);
+				const int y = m_szHeader.cy + (static_cast<int>(row) - GetYScrollPos() + static_cast<int>(m_nMidRow)) * GetRowHeight() - GetSmoothScrollOffset() + GetRowHeight() / 2;
+				if(y < rect.top) { lastX = x; continue; }
+				if(y > rect.bottom + GetRowHeight()) break;
+				::SetDCPenColor(dc,row % std::max<ROWINDEX>(GetRowsPerBeat(),1) == 0 ? RGB(184,193,184) : RGB(217,221,213));
+				::MoveToEx(dc,rect.left+1,y-GetRowHeight()/2,nullptr); ::LineTo(dc,rect.right-1,y-GetRowHeight()/2);
+				::SetDCPenColor(dc,color); ::MoveToEx(dc,lastX,lastY,nullptr); ::LineTo(dc,lastX,y); ::LineTo(dc,x,y);
+
+				auto probe = cell;
+				if(WriteAutomationValue(probe,lane,value,format) == AutomationEdit::Blocked)
+				{ ::SetDCPenColor(dc,RGB(170,66,66)); ::MoveToEx(dc,rect.right-pad,y-node,nullptr); ::LineTo(dc,rect.right-node,y+node); }
+				lastX = x; lastY = y;
+			}
+			if(lastY < rect.bottom) { ::SetDCPenColor(dc,color); ::MoveToEx(dc,lastX,lastY,nullptr); ::LineTo(dc,lastX,rect.bottom); }
+
+            const auto nodes = GetAutomationNodes(channel, lane);
+            const auto oldFont = ::SelectObject(dc, CMainFrame::GetGUIFont());
+            const auto oldText = ::SetTextColor(dc, color); const int oldMode = ::SetBkMode(dc, TRANSPARENT);
+            for(size_t index = 0; index < nodes.size(); index++)
+            {
+                const auto point = AutomationNodePosition(channel, lane, nodes[index]);
+                if(index > 0)
+                {
+                    const auto previous = AutomationNodePosition(channel, lane, nodes[index - 1]);
+                    ::SetDCPenColor(dc, color); ::MoveToEx(dc, previous.x, previous.y, nullptr); ::LineTo(dc, point.x, point.y);
+                }
+                if(point.y < rect.top || point.y > rect.bottom) continue;
+                ::SetDCPenColor(dc, color); ::SetDCBrushColor(dc, color);
+                ::Ellipse(dc, point.x - node * 3, point.y - node * 3, point.x + node * 3 + 1, point.y + node * 3 + 1);
+                char label[12]; sprintf(label, "%d", nodes[index].value);
+                CRect text(rect.left + pad, point.y - GetRowHeight() - node * 2, rect.right - pad, point.y - node * 2);
+                ::DrawTextA(dc, label, -1, &text, DT_SINGLELINE | DT_CENTER | DT_BOTTOM);
+            }
+            ::SetBkMode(dc, oldMode); ::SetTextColor(dc, oldText); ::SelectObject(dc, oldFont);
+            if(m_automationLinePending && m_automationPattern == m_nPattern && m_automationChannel == channel && m_automationLane == lane)
+            {
+                const auto start = AutomationNodePosition(channel, lane, m_lineStart), end = AutomationNodePosition(channel, lane, m_lineEnd);
+                const auto previewPen = ::CreatePen(PS_DOT, 1, RGB(44, 94, 210)); const auto prior = ::SelectObject(dc, previewPen);
+                ::MoveToEx(dc, start.x, start.y, nullptr); ::LineTo(dc, end.x, end.y);
+                ::SelectObject(dc, prior); ::DeleteObject(previewPen);
+            }
+			if(m_nPlayPat == m_nPattern && CMainFrame::GetMainFrame()->GetModPlaying() == GetDocument())
+			{
+				const int y = m_szHeader.cy + (static_cast<int>(m_nPlayRow)-GetYScrollPos()+static_cast<int>(m_nMidRow))*GetRowHeight()-GetSmoothScrollOffset();
+				::SetDCPenColor(dc,GetSysColor(COLOR_HIGHLIGHT)); ::MoveToEx(dc,rect.left,y,nullptr); ::LineTo(dc,rect.right,y);
+			}
+			::RestoreDC(dc,saved);
+		}
+	}
+	::SelectObject(dc,oldBrush); ::SelectObject(dc,oldPen);
+}
+
+
 void CViewPattern::OnDraw(CDC *pDC)
 {
 	CMainFrame *pMainFrm = CMainFrame::GetMainFrame();
@@ -538,6 +725,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 	if ((pModDoc = GetDocument()) == nullptr)
 		return;
 	m_chnState.resize(pModDoc->GetNumChannels());
+	RefreshAutomationPresence();
 
 	FlagSet<PatternSetup> patternSetup = TrackerSettings::Instance().patternSetup;
 	const int vuHeight = MulDiv(VUMETERS_HEIGHT, m_dpi, 96);
@@ -624,7 +812,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 				ROWINDEX n = std::min(static_cast<ROWINDEX>(nSkip), nPrevRows);
 
 				ypaint += (nSkip - n) * m_szCell.cy;
-				rect.SetRect(0, m_szHeader.cy, nColumnWidth * numChannels + m_szHeader.cx, ypaint - 1);
+				rect.SetRect(0, m_szHeader.cy, GetTrackScrollPixel(static_cast<CHANNELINDEX>(numChannels)) - GetTrackScrollPixel(xofs) + m_szHeader.cx, ypaint - 1);
 				m_Dib.SetBlendMode(true);
 				DrawPatternData(hdc, lineWidth, nPrevPat, false, false,
 						nPrevRows - n, nPrevRows, xofs, rcClient, &ypaint);
@@ -632,7 +820,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 			} else
 			{
 				ypaint += nSkip * m_szCell.cy;
-				rect.SetRect(0, m_szHeader.cy, nColumnWidth * numChannels + m_szHeader.cx, ypaint - 1);
+				rect.SetRect(0, m_szHeader.cy, GetTrackScrollPixel(static_cast<CHANNELINDEX>(numChannels)) - GetTrackScrollPixel(xofs) + m_szHeader.cx, ypaint - 1);
 			}
 			if ((rect.bottom > rect.top) && (rect.right > rect.left))
 			{
@@ -679,7 +867,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 		}
 	}
 	// Drawing outside pattern area
-	int xpaint = m_szHeader.cx + (numChannels - xofs) * nColumnWidth;
+	int xpaint = GetTrackLeft(static_cast<CHANNELINDEX>(numChannels));
 	if ((xpaint < rcClient.right) && (ypaint > rcClient.top))
 	{
 		rc.SetRect(xpaint, rcClient.top, rcClient.right, ypaint);
@@ -701,6 +889,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 		DrawDragSel(hdc);
 	}
 
+	DrawAutomationLanes(hdc, false, lineWidth);
 	const auto buttonBrush = GetSysColorBrush(COLOR_BTNFACE), blackBrush = GetStockBrush(BLACK_BRUSH);
 	rect.SetRect(0, rcClient.top, rcClient.right, rcClient.top + m_szHeader.cy);
 	if(pDC->RectVisible(rect))
@@ -717,9 +906,9 @@ void CViewPattern::OnDraw(CDC *pDC)
 		const int dropWidth = HighDPISupport::ScalePixels(2, m_hWnd);
 		UINT chn = xofs;
 		ypaint = rcClient.top;
-		for(xpaint = m_szHeader.cx; xpaint < clipRect.right; xpaint += nColumnWidth, chn++)
+		for(xpaint = m_szHeader.cx; xpaint < clipRect.right; xpaint += GetTrackWidth(static_cast<CHANNELINDEX>(chn)), chn++)
 		{
-			rect.SetRect(xpaint, ypaint, xpaint + nColumnWidth, ypaint + m_szHeader.cy);
+			rect.SetRect(xpaint, ypaint, xpaint + GetNoteTrackWidth(static_cast<CHANNELINDEX>(chn)), ypaint + m_szHeader.cy);
 			if(chn < numChannels)
 			{
 				if(!pDC->RectVisible(rect))
@@ -736,7 +925,9 @@ void CViewPattern::OnDraw(CDC *pDC)
 				else if(numVisibleColums < 5)
 					pszfmt = sndFile.m_bChannelMuteTogglePending[chn] ? "[Chn %u]" : "Chn %u";
 				sprintf(s, pszfmt, chn + 1, channel.szName.buf);
-				DrawButtonRect(m_offScreenDC, lineWidth, rect, s,
+				DrawButtonRect(m_offScreenDC, lineWidth, rect, "");
+				auto nameRect = GetTrackControlRect(static_cast<CHANNELINDEX>(chn), DragItem::ChannelHeader);
+				DrawButtonRect(m_offScreenDC, lineWidth, nameRect, s,
 					channel.dwFlags[CHN_MUTE],
 					m_bInItemRect && m_nDragItem.Type() == DragItem::ChannelHeader && m_nDragItem.Value() == chn,
 					recordGroup != RecordGroup::NoGroup ? DT_RIGHT : DT_CENTER, chanColorHeight);
@@ -786,6 +977,8 @@ void CViewPattern::OnDraw(CDC *pDC)
 					FrameRect(m_offScreenDC, &insRect, blackBrush);
 				}
 
+				DrawTrackControls(m_offScreenDC, static_cast<CHANNELINDEX>(chn), lineWidth);
+				rect.bottom = MulDiv(TrackNameHeight + TrackControlHeight * 2, m_dpi, 96);
 				if(m_Status[psShowVUMeters])
 				{
 					m_chnState[chn].vuMeterOld = 0;
@@ -809,6 +1002,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 				break;
 			}
 		}
+		DrawAutomationLanes(m_offScreenDC, true, lineWidth);
 		if(!doSmoothScroll)
 		{
 			pDC->BitBlt(clipRect.left, clipRect.top, xpaint - clipRect.left, m_szHeader.cy - clipRect.top, &m_offScreenDC, clipRect.left, clipRect.top, SRCCOPY);
@@ -854,14 +1048,14 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 	
 	const CHANNELINDEX ncols = sndFile.GetNumChannels();
 	const UINT nColumnWidth = m_szCell.cx;
-	rect.SetRect(m_szHeader.cx, rcClient.top, m_szHeader.cx+nColumnWidth, rcClient.bottom);
+	rect.SetRect(m_szHeader.cx, rcClient.top, m_szHeader.cx + GetNoteTrackWidth(startChan), rcClient.bottom);
 	for(CHANNELINDEX cmk = startChan; cmk < ncols; cmk++)
 	{
 		m_chnState[cmk].selectedCols = selEnable ? m_Selection.GetSelectionBits(cmk) : 0;
 		if(!::RectVisible(hdc, &rect))
 			m_chnState[cmk].selectedCols |= COLUMN_BITS_INVISIBLE;
-		rect.left += nColumnWidth;
-		rect.right += nColumnWidth;
+		rect.left += GetTrackWidth(cmk);
+		rect.right = rect.left + GetNoteTrackWidth(static_cast<CHANNELINDEX>(std::min<int>(cmk + 1, ncols - 1)));
 	}
 	// Max Visible Column
 	CHANNELINDEX maxcol = ncols;
@@ -881,14 +1075,15 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 
 	// Init bitmap border
 	{
-		UINT maxndx = sndFile.GetNumChannels() * m_szCell.cx;
 		UINT ibmp = 0;
-		if (maxndx > (UINT)m_Dib.GetWidth()) maxndx = m_Dib.GetWidth();
-		do
+		CHANNELINDEX firstVisible = startChan;
+		while(firstVisible < maxcol && (m_chnState[firstVisible].selectedCols & COLUMN_BITS_INVISIBLE)) firstVisible++;
+		for(CHANNELINDEX channel = firstVisible; channel < maxcol; channel++)
 		{
-			ibmp += nColumnWidth;
-			m_Dib.TextBlt(ibmp - SEPARATOR_WIDTH, 0, SEPARATOR_WIDTH, m_szCell.cy, pfnt->nClrX + pfnt->nWidth - SEPARATOR_WIDTH, pfnt->nClrY, pfnt->dib);
-		} while (ibmp + nColumnWidth <= maxndx);
+			if(ibmp + nColumnWidth > static_cast<UINT>(m_Dib.GetWidth())) break;
+			m_Dib.TextBlt(ibmp + GetNoteTrackWidth(channel) - SEPARATOR_WIDTH, 0, SEPARATOR_WIDTH, m_szCell.cy, pfnt->nClrX + pfnt->nWidth - SEPARATOR_WIDTH, pfnt->nClrY, pfnt->dib);
+			ibmp += GetTrackWidth(channel);
+		}
 	}
 
 	// Time signature highlighting
@@ -996,12 +1191,13 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 		// Eliminate non-visible column
 		xpaint = m_szHeader.cx;
 		col = startChan;
-		while((m_chnState[col].selectedCols & COLUMN_BITS_INVISIBLE) && (col < maxcol))
+		while(col < maxcol && (m_chnState[col].selectedCols & COLUMN_BITS_INVISIBLE))
 		{
 			m_chnState[col].selectedCols &= ~COLUMN_BITS_SKIP;
+			xpaint += GetTrackWidth(static_cast<CHANNELINDEX>(col));
 			col++;
-			xpaint += nColumnWidth;
 		}
+		if(col >= maxcol) { ypaint += m_szCell.cy; if(ypaint >= rcClient.bottom) break; continue; }
 		// Optimization: same row color ?
 		const bool useSpeedUpMask = (oldrowcolor == EncodeRowColor(row_bkcol, row_col, bRowSel)) && !blendModeChanged;
 		xbmp = nbmp = 0;
@@ -1231,12 +1427,17 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 				}
 			}
 		DoBlit:
+			if(const int extra = GetNoteTrackWidth(static_cast<CHANNELINDEX>(col)) - nColumnWidth; extra > 0)
+			{
+				m_Dib.FillRect(xbmp + nColumnWidth - SEPARATOR_WIDTH, 0, extra, m_szCell.cy, static_cast<uint8>(bRowSel ? MODCOLOR_BACKSELECTED : row_bkcol));
+				m_Dib.TextBlt(xbmp + GetNoteTrackWidth(static_cast<CHANNELINDEX>(col)) - SEPARATOR_WIDTH, 0, SEPARATOR_WIDTH, m_szCell.cy, pfnt->nClrX + pfnt->nWidth - SEPARATOR_WIDTH, pfnt->nClrY, pfnt->dib);
+			}
 			nbmp++;
-			xbmp += nColumnWidth;
-			xpaint += nColumnWidth;
+			xbmp += GetTrackWidth(static_cast<CHANNELINDEX>(col));
+			xpaint += GetTrackWidth(static_cast<CHANNELINDEX>(col));
 			if ((xbmp + nColumnWidth >= (UINT)m_Dib.GetWidth()) || (xpaint >= rcClient.right)) break;
 		} while (++col < maxcol);
-		m_Dib.Blit(hdc, xpaint-xbmp, ypaint, xbmp, m_szCell.cy);
+		m_Dib.Blit(hdc, xpaint-xbmp, ypaint, std::min(xbmp, static_cast<UINT>(m_Dib.GetWidth())), m_szCell.cy);
 		// skip row
 		ypaint += m_szCell.cy;
 		if (ypaint >= rcClient.bottom) break;
@@ -1276,7 +1477,7 @@ void CViewPattern::DrawChannelVUMeter(HDC hdc, int x, int y, UINT nChn)
 
 	const auto oldBitmap = m_vuMeterDC.SelectObject(m_vuMeterBitmap);
 	const int srcOffsetX = isSynth ? barWidth * 2 : 0;
-	x += (m_szCell.cx / 2);
+	x += (GetNoteTrackWidth(static_cast<CHANNELINDEX>(nChn)) / 2);
 	BitBlt(hdc, x - barWidth - (midSpacer - midSpacer / 2), y, barWidth, m_ledHeight, m_vuMeterDC, srcOffsetX, vuL * m_ledHeight, SRCCOPY);
 	BitBlt(hdc, x + midSpacer / 2, y, barWidth, m_ledHeight, m_vuMeterDC, srcOffsetX + barWidth, vuR * m_ledHeight, SRCCOPY);
 	m_vuMeterDC.SelectObject(oldBitmap);
@@ -1416,7 +1617,7 @@ void CViewPattern::UpdateScrollSize()
 
 	CRect rect;
 	SIZE sizeTotal, sizePage, sizeLine;
-	sizeTotal.cx = m_szHeader.cx + numChannels * m_szCell.cx;
+	sizeTotal.cx = m_szHeader.cx + GetTrackScrollPixel(static_cast<CHANNELINDEX>(numChannels));
 	sizeTotal.cy = m_szHeader.cy + numRows * m_szCell.cy;
 	sizeLine.cx = m_szCell.cx;
 	sizeLine.cy = m_szCell.cy;
@@ -1442,7 +1643,7 @@ void CViewPattern::UpdateScrollPos()
 	
 	int x = GetScrollPos(SB_HORZ);
 	if (x < 0) x = 0;
-	m_nXScroll = (x + m_szCell.cx - 1) / m_szCell.cx;
+	m_nXScroll = GetTrackAtScrollPixel(x);
 	int y = GetScrollPos(SB_VERT);
 	if (y < 0) y = 0;
 	m_nYScroll = (y + m_szCell.cy - 1) / m_szCell.cy;
@@ -1476,7 +1677,15 @@ BOOL CViewPattern::OnScrollBy(CSize sizeScroll, BOOL bDoScroll)
 	// adjust current x position
 	xOrig = x = GetScrollPos(SB_HORZ);
 	int xMax = GetScrollLimit(SB_HORZ);
-	x += sizeScroll.cx;
+	if(sizeScroll.cx != 0 && std::abs(sizeScroll.cx) == m_szCell.cx)
+	{
+		// A horizontal line step moves one complete track, including its open lanes.
+		const int channel = std::max(0, static_cast<int>(m_nXScroll) + (sizeScroll.cx > 0 ? 1 : -1));
+		x = GetTrackScrollPixel(static_cast<CHANNELINDEX>(channel));
+	} else
+	{
+		x += sizeScroll.cx;
+	}
 	if (x < 0) x = 0; else if (x > xMax) x = xMax;
 
 	// adjust current y position
@@ -1486,10 +1695,9 @@ BOOL CViewPattern::OnScrollBy(CSize sizeScroll, BOOL bDoScroll)
 	if (y < 0) y = 0; else if (y > yMax) y = yMax;
 
 	if (!bDoScroll) return TRUE;
-	xNew = x;
+	x = GetTrackAtScrollPixel(x);
+	xNew = std::min(GetTrackScrollPixel(static_cast<CHANNELINDEX>(x)), xMax);
 	yNew = y;
-
-	if (x > 0) x = (x + m_szCell.cx - 1) / m_szCell.cx; else x = 0;
 	if (y > 0) y = (y + m_szCell.cy - 1) / m_szCell.cy; else y = 0;
 	if ((x != m_nXScroll) || (y != m_nYScroll))
 	{
@@ -1516,7 +1724,7 @@ BOOL CViewPattern::OnScrollBy(CSize sizeScroll, BOOL bDoScroll)
 				InvalidateRect(&rect, FALSE);
 			} else
 			{
-				ScrollWindow((m_nXScroll - x) * GetChannelWidth(), 0, &rect, &rect);
+				InvalidateRect(&rect, FALSE);
 			}
 			m_nXScroll = x;
 		}
@@ -1684,7 +1892,7 @@ void CViewPattern::InvalidateChannelsHeaders(CHANNELINDEX chn)
 	if(chn != CHANNELINDEX_INVALID)
 	{
 		rect.left = GetPointFromPosition(PatternCursor{ 0u, chn }).x;
-		rect.right = rect.left + GetChannelWidth();
+		rect.right = rect.left + GetTrackWidth(chn);
 	}
 	InvalidateRect(&rect, FALSE);
 }
@@ -1880,7 +2088,7 @@ void CViewPattern::UpdateAllVUMeters(Notification *pnotify)
 	int x = m_szHeader.cx;
 	CHANNELINDEX nChn = static_cast<CHANNELINDEX>(xofs);
 	const CHANNELINDEX numChannels = std::min(pModDoc->GetNumChannels(), static_cast<CHANNELINDEX>(m_chnState.size()));
-	const int yPos = rcClient.top + MulDiv(COLHDR_HEIGHT, m_dpi, 96);
+	const int yPos = MulDiv(TrackNameHeight + TrackControlHeight * 2, m_dpi, 96);
 	while(nChn < numChannels && x < rcClient.right)
 	{
 		m_chnState[nChn].vuMeter = static_cast<uint16>(pnotify->pos[nChn]);
@@ -1888,7 +2096,7 @@ void CViewPattern::UpdateAllVUMeters(Notification *pnotify)
 			m_chnState[nChn].vuMeter = 0;
 		DrawChannelVUMeter(hdc, x, rcClient.top + yPos, nChn);
 		nChn++;
-		x += m_szCell.cx;
+		x += GetTrackWidth(static_cast<CHANNELINDEX>(nChn - 1));
 	}
 	::ReleaseDC(m_hWnd, hdc);
 }

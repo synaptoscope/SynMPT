@@ -116,6 +116,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWnd)
 	ON_COMMAND(ID_PLAYER_PAUSE,   &CMainFrame::OnPlayerPause)
 
 	ON_COMMAND_EX(IDD_TREEVIEW,         &CMainFrame::OnBarCheck)
+	ON_COMMAND(ID_VIEW_TRANSPORT,       &CMainFrame::OnViewTransport)
+	ON_COMMAND(ID_TRANSPORT_BRING_HERE,  &CMainFrame::OnBringTransportHere)
 	ON_COMMAND_EX(ID_NETLINK_MODPLUG,   &CMainFrame::OnInternetLink)
 	ON_COMMAND_EX(ID_NETLINK_TOP_PICKS, &CMainFrame::OnInternetLink)
 
@@ -170,6 +172,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWnd)
 	ON_UPDATE_COMMAND_UI(ID_INDICATOR_INFO,  &CMainFrame::OnUpdateInfo)
 	ON_UPDATE_COMMAND_UI(ID_INDICATOR_XINFO, &CMainFrame::OnUpdateXInfo)
 	ON_UPDATE_COMMAND_UI(IDD_TREEVIEW,       &CMainFrame::OnUpdateControlBarMenu)
+	ON_UPDATE_COMMAND_UI(ID_VIEW_TRANSPORT,  &CMainFrame::OnUpdateViewTransport)
 	//}}AFX_MSG_MAP
 END_MESSAGE_MAP()
 
@@ -251,6 +254,12 @@ void CMainFrame::Initialize()
 	// Update the tree
 	m_wndTree.Init();
 
+	// Floating bars can paint immediately during restoration. The application now
+	// owns this main frame, and its controls, colors and playback services are ready.
+	RemoveControlBar(&m_wndStatusBar);
+	LoadBarState(_T("Toolbars"));
+	AddControlBar(&m_wndStatusBar);
+
 	CreateExampleModulesMenu();
 	CreateTemplateModulesMenu();
 	UpdateMRUList();
@@ -311,19 +320,16 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 	// Toolbars
 	EnableDocking(CBRS_ALIGN_ANY);
 	if (!m_wndToolBar.Create(this)) return -1;
+	if (!m_wndTransport.Create(this)) return -1;
 	if (!m_wndStatusBar.Create(this)) return -1;
 	if (!m_wndTree.Create(this, IDD_TREEVIEW, TrackerSettings::Instance().treeViewOnLeft ? CBRS_LEFT : CBRS_RIGHT, IDD_TREEVIEW)) return -1;
 	m_wndStatusBar.SetIndicators(StatusBarIndicators, static_cast<int>(std::size(StatusBarIndicators)));
 	SetupStatusBarSizes();
 	m_wndToolBar.Init(this);
+	m_wndTransport.Init(this);
 	m_wndTree.RecalcLayout();
 
-	RemoveControlBar(&m_wndStatusBar); //Removing statusbar because corrupted statusbar inifiledata can crash the program.
-	m_wndTree.EnableDocking(0); //To prevent a crash when there's "Docking=1" for treebar in ini-settings.
-	// Restore toobar positions
-	LoadBarState(_T("Toolbars"));
-
-	AddControlBar(&m_wndStatusBar); //Restore statusbar to mainframe.
+	m_wndTree.EnableDocking(0); // Do not allow the tree bar to be restored as a dockable bar.
 
 	UpdateColors();
 
@@ -1352,6 +1358,7 @@ void CMainFrame::UpdateColors()
 	if(mainFrm != nullptr)
 	{
 		mainFrm->m_wndToolBar.m_VuMeter.Invalidate();
+		mainFrm->m_wndTransport.m_VuMeter.Invalidate();
 	}
 }
 
@@ -1493,6 +1500,7 @@ void CMainFrame::UnsetPlaybackSoundFile()
 	}
 	m_pSndFile = nullptr;
 	m_wndToolBar.SetCurrentSong(nullptr);
+	m_wndTransport.SetCurrentSong(nullptr);
 	ResetNotificationBuffer();
 }
 
@@ -1537,6 +1545,7 @@ bool CMainFrame::PlayMod(CModDoc *pModDoc)
 	sndFile.ResumePlugins();
 
 	m_wndToolBar.SetCurrentSong(m_pSndFile);
+	m_wndTransport.SetCurrentSong(m_pSndFile);
 
 	m_VUMeterInput = VUMeter();
 	m_VUMeterOutput = VUMeter();
@@ -1950,6 +1959,7 @@ void CMainFrame::SetupMiscOptions()
 	}
 
 	m_wndToolBar.EnableFlatButtons(patternSetup[PatternSetup::FlatToolbarButtons]);
+	m_wndTransport.EnableFlatButtons(patternSetup[PatternSetup::FlatToolbarButtons]);
 
 	UpdateTree(nullptr, UpdateHint().MPTOptions());
 	theApp.UpdateAllViews(UpdateHint().MPTOptions());
@@ -2635,8 +2645,10 @@ LRESULT CMainFrame::OnUpdatePosition(WPARAM, LPARAM lParam)
 		}
 
 		m_wndToolBar.m_VuMeter.SetVuMeter(countChan, vu, pnotify->type[Notification::Stop]);
+		m_wndTransport.m_VuMeter.SetVuMeter(countChan, vu, pnotify->type[Notification::Stop]);
 
 		m_wndToolBar.SetCurrentSong(m_pSndFile);
+		m_wndTransport.SetCurrentSong(m_pSndFile);
 	}
 	return 0;
 }
@@ -2719,6 +2731,62 @@ void CMainFrame::OnRButtonDown(UINT, CPoint pt)
 }
 
 
+void CMainFrame::OnViewTransport()
+{
+	if(m_wndTransport.IsWindowVisible())
+		ShowControlBar(&m_wndTransport, FALSE, FALSE);
+	else
+		ShowTransport(false);
+}
+
+
+void CMainFrame::OnUpdateViewTransport(CCmdUI *cmdUI)
+{
+	cmdUI->Enable();
+	cmdUI->SetCheck(m_wndTransport.IsWindowVisible() ? 1 : 0);
+}
+
+
+void CMainFrame::OnBringTransportHere()
+{
+	ShowTransport(true);
+}
+
+
+void CMainFrame::ShowTransport(bool resetPosition)
+{
+	// A transport with all of its button groups hidden cannot be recovered visibly.
+	FlagSet<MainToolBarItem> items = TrackerSettings::Instance().mainToolBarVisibleItems.Get();
+	if(!items[MainToolBarItem::IconsPlayback])
+	{
+		items.set(MainToolBarItem::IconsPlayback);
+		TrackerSettings::Instance().mainToolBarVisibleItems = items.value().as_enum();
+		m_wndTransport.RefreshVisibility();
+	}
+
+	CRect barRect;
+	m_wndTransport.GetWindowRect(barRect);
+	const bool offScreen = m_wndTransport.IsFloating() && !::MonitorFromRect(barRect, MONITOR_DEFAULTTONULL);
+	if(resetPosition || offScreen)
+	{
+		CRect frameRect;
+		GetWindowRect(frameRect);
+		MONITORINFO monitor{sizeof(MONITORINFO)};
+		::GetMonitorInfo(::MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST), &monitor);
+		const int padding = HighDPISupport::ScalePixels(16, m_hWnd);
+		const int x = Clamp(static_cast<int>(frameRect.left) + padding * 5, static_cast<int>(monitor.rcWork.left) + padding,
+			std::max(static_cast<int>(monitor.rcWork.left) + padding, static_cast<int>(monitor.rcWork.right - barRect.Width()) - padding));
+		const int y = Clamp(static_cast<int>(frameRect.top) + padding * 6, static_cast<int>(monitor.rcWork.top) + padding,
+			std::max(static_cast<int>(monitor.rcWork.top) + padding, static_cast<int>(monitor.rcWork.bottom - barRect.Height()) - padding * 2));
+		FloatControlBar(&m_wndTransport, CPoint(x, y));
+	}
+	ShowControlBar(&m_wndTransport, TRUE, FALSE);
+	if(m_wndTransport.IsFloating())
+		m_wndTransport.GetParentFrame()->ShowWindow(SW_SHOWNOACTIVATE);
+	RecalcLayout();
+}
+
+
 void CMainFrame::ShowToolbarMenu(CPoint screenPt)
 {
 	CMenu menu;
@@ -2732,6 +2800,8 @@ void CMainFrame::ShowToolbarMenu(CPoint screenPt)
 void CMainFrame::AddToolBarMenuEntries(CMenu &menu) const
 {
 	menu.AppendMenu(MF_STRING, ID_VIEW_TOOLBAR, m_InputHandler->GetMenuText(ID_VIEW_TOOLBAR));
+	menu.AppendMenu(MF_STRING, ID_VIEW_TRANSPORT, _T("&Transport"));
+	menu.AppendMenu(MF_STRING, ID_TRANSPORT_BRING_HERE, _T("Bring Transport &Here"));
 	menu.AppendMenu(MF_STRING, IDD_TREEVIEW, m_InputHandler->GetMenuText(IDD_TREEVIEW));
 	menu.AppendMenu(MF_STRING | (TrackerSettings::Instance().treeViewOnLeft ? MF_CHECKED : 0), ID_TREEVIEW_ON_LEFT, _T("Tree View on &Left"));
 
@@ -2750,7 +2820,7 @@ void CMainFrame::AddToolBarMenuEntries(CMenu &menu) const
 	subMenu.AppendMenu(MF_STRING | (visibleItems[MainToolBarItem::GlobalVolume] ? MF_CHECKED : 0), ID_MAINBAR_SHOW_GLOBALVOLUME, _T("&Global Volume"));
 	subMenu.AppendMenu(MF_STRING | (visibleItems[MainToolBarItem::IconsMisc] ? MF_CHECKED : 0), ID_MAINBAR_SHOW_MISC_ICONS, _T("&Misc Icons"));
 	subMenu.AppendMenu(MF_STRING | (visibleItems[MainToolBarItem::VUMeter] ? MF_CHECKED : 0), ID_MAINBAR_SHOW_VUMETER, _T("&VU Meters"));
-	menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(subMenu.Detach()), _T("Main Toolbar &Items"));
+	menu.AppendMenu(MF_POPUP, reinterpret_cast<UINT_PTR>(subMenu.Detach()), _T("Toolbar &Items"));
 }
 
 
@@ -2768,6 +2838,7 @@ void CMainFrame::OnToggleMainBarShowMiscIcons() { OnToggleMainBarItem(MainToolBa
 void CMainFrame::OnToggleMainBarItem(MainToolBarItem item, UINT menuID)
 {
 	const bool visible = m_wndToolBar.ToggleVisibility(item);
+	m_wndTransport.RefreshVisibility();
 	GetMenu()->CheckMenuItem(menuID, MF_BYCOMMAND | (visible ? MF_CHECKED : 0));
 }
 
@@ -2982,6 +3053,13 @@ void CMainFrame::OnShowWindow(BOOL bShow, UINT /*nStatus*/)
 		GetWindowPlacement(&wpl);
 		wpl = theApp.GetSettings().Read<WINDOWPLACEMENT>(U_("Display"), U_("WindowPlacement"), wpl);
 		HighDPISupport::SetWindowPlacement(m_hWnd, wpl);
+
+		// First-run placement follows the restored main window position.
+		if(theApp.GetProfileInt(_T("Toolbars"), _T("SynMPTTransport"), 0) < 2)
+		{
+			ShowTransport(true);
+			theApp.WriteProfileInt(_T("Toolbars"), _T("SynMPTTransport"), 2);
+		}
 	}
 }
 

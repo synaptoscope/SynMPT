@@ -259,6 +259,9 @@ struct ModChannelSettings
 	uint16 nPan = 128;              // Initial pan (0...256)
 	uint8 nVolume = 64;             // Initial channel volume (0...64)
 	PLUGINDEX nMixPlugin = 0;       // Assigned plugin
+	uint16 trackInstrument = 0;     // SynMPT: 0 uses the instruments written in patterns.
+	CHANNELINDEX parentBus = CHANNELINDEX_INVALID;
+	bool isBus = false;
 
 	mpt::charbuf<MAX_CHANNELNAME> szName;  // Channel name
 };

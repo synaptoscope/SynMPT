@@ -107,11 +107,12 @@ protected:
 	int m_currentSpeed = 0, m_currentOctave = -1, m_currentRowsPerBeat = 0, m_currentGlobalVolume = 0;
 	TEMPO m_currentTempo{1, 0};
 	bool m_updating = false;
+	const bool m_transport;
 public:
 	CStereoVU m_VuMeter;
 
 public:
-	CMainToolBar() : m_EditOctave{*this} { }
+	explicit CMainToolBar(bool transport = false) : m_EditOctave{*this}, m_transport{transport} { }
 
 protected:
 	void SetRowsPerBeat(ROWINDEX nNewRPB);
@@ -140,6 +141,7 @@ public:
 	void RemoveUpdateInfo();
 
 	bool ToggleVisibility(MainToolBarItem item);
+	void RefreshVisibility() { RefreshToolbar(); }
 
 protected:
 	void RefreshToolbar();

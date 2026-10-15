@@ -443,6 +443,7 @@ public:
 	void SetBlendMode(bool enable) { m_nBlendOffset = enable ? BLEND_OFFSET : 0; }
 	bool GetBlendMode() const { return m_nBlendOffset != 0; }
 	void SetBlendColor(COLORREF cr);
+	void FillRect(int x, int y, int width, int height, uint8 color);
 	void SetSize(int x, int y);
 	int GetWidth() const { return m_Dib.bmiHeader.biWidth; }
 };
