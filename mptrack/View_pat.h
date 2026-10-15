@@ -20,6 +20,7 @@
 #include "PatternEditorDialogs.h"
 #include "PatternClipboard.h"
 #include "PatternAutomation.h"
+#include "TrackHeader.h"
 #include "UpdateHints.h"
 
 OPENMPT_NAMESPACE_BEGIN
@@ -159,6 +160,9 @@ protected:
 
 	static constexpr int TrackNameHeight = 20;
 	static constexpr int TrackControlHeight = 18;
+	TrackHeaderSelection m_trackSelection;
+	std::vector<bool> m_trackSoloTargets;
+	bool m_trackHeaderClick = false;
 	int m_defaultTrackWidth = 0;
 	CHANNELINDEX m_resizingTrack = CHANNELINDEX_INVALID;
 	int m_resizeStartX = 0, m_resizeStartWidth = 0;
@@ -273,6 +277,12 @@ public:
 	CRect GetTrackSliderRect(CHANNELINDEX channel, DragItem::DragType type) const;
 	bool CanEditTrackControl(DragItem::DragType type) const;
 	bool IsTrackSolo(CHANNELINDEX channel) const;
+	int GetTrackHeaderHeight() const { return TrackHeaderLayout(m_dpi).ControlsBottom(); }
+	void SelectTrackHeader(CHANNELINDEX channel, UINT flags);
+	void OnMuteTrackSelection(CHANNELINDEX channel);
+	void OnSoloTrackSelection(CHANNELINDEX channel);
+	bool IsTrackSoloMaskActive() const;
+	void SoloTrackMask(const std::vector<bool> &selected, bool toggle = true);
 	void DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth);
 	void UpdateTrackSlider(CPoint point);
 	void SetTrackSliderValue(int value);

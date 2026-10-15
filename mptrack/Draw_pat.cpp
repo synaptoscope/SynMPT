@@ -123,10 +123,10 @@ bool CViewPattern::UpdateSizes()
 	const PATTERNFONT *pfnt = PatternFont::currentFont;
 	int oldx = m_szCell.cx, oldy = m_szCell.cy;
 	m_szHeader.cx = ROWHDR_WIDTH;
-	m_szHeader.cy = TrackNameHeight + TrackControlHeight * 4;
+	m_szHeader.cy = GetTrackHeaderHeight();
 	m_szPluginHeader.cx = 0;
 	m_szPluginHeader.cy = m_Status[psShowPluginNames] ? MulDiv(PLUGNAME_HEIGHT, m_dpi, 96) : 0;
-	if(m_Status[psShowVUMeters]) m_szHeader.cy += VUMETERS_HEIGHT;
+	if(m_Status[psShowVUMeters]) m_szHeader.cy += MulDiv(VUMETERS_HEIGHT, m_dpi, 96);
 	m_szCell.cx = SEPARATOR_WIDTH;
 	for(size_t i = 0; i <= PatternCursor::lastColumn; i++)
 	{
@@ -136,7 +136,6 @@ bool CViewPattern::UpdateSizes()
 	m_szCell.cy = pfnt->nHeight;
 
 	m_szHeader.cx = MulDiv(m_szHeader.cx, m_dpi, 96);
-	m_szHeader.cy = MulDiv(m_szHeader.cy, m_dpi, 96);
 	m_szHeader.cy += m_szPluginHeader.cy;
 
 	if(oldy != m_szCell.cy)
@@ -548,7 +547,7 @@ void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth
 	::SelectObject(dc, oldSoloFont);
 	const auto record = GetDocument()->GetChannelRecordGroup(channel);
 	auto recordRect = GetTrackControlRect(channel, DragItem::ChannelRecord);
-	DrawButtonRect(dc, lineWidth, recordRect, "R", settings.isBus, record != RecordGroup::NoGroup);
+	DrawButtonRect(dc, lineWidth, recordRect, record == RecordGroup::Group2 ? "R2" : "R", settings.isBus, record != RecordGroup::NoGroup);
 	auto routeRect = GetTrackControlRect(channel, DragItem::ChannelRouting);
 	CString route = settings.isBus ? _T("Bus") : _T("Out");
 	if(settings.parentBus < GetSoundFile()->GetNumChannels()) route = mpt::ToCString(GetSoundFile()->GetCharsetInternal(), GetSoundFile()->ChnSettings[settings.parentBus].szName.buf);
@@ -725,14 +724,14 @@ void CViewPattern::OnDraw(CDC *pDC)
 	if ((pModDoc = GetDocument()) == nullptr)
 		return;
 	m_chnState.resize(pModDoc->GetNumChannels());
+	if(m_trackSelection.Size() != pModDoc->GetNumChannels())
+		m_trackSelection.Click(std::min<CHANNELINDEX>(GetCurrentChannel(), pModDoc->GetNumChannels() - 1), pModDoc->GetNumChannels(), false, false);
 	RefreshAutomationPresence();
 
 	FlagSet<PatternSetup> patternSetup = TrackerSettings::Instance().patternSetup;
 	const int vuHeight = MulDiv(VUMETERS_HEIGHT, m_dpi, 96);
-	const int colHeight = MulDiv(COLHDR_HEIGHT, m_dpi, 96);
 	const int chanColorHeight = MulDiv(4, m_dpi, 96);
 	const int chanColorOffset = MulDiv(2, m_dpi, 96);
-	const int recordInsX = MulDiv(3, m_dpi, 96);
 	const bool doSmoothScroll = patternSetup[PatternSetup::SmoothScrolling];
 	const int lineWidth = HighDPISupport::ScalePixels(1, *this);
 
@@ -776,7 +775,6 @@ void CViewPattern::OnDraw(CDC *pDC)
 	CHANNELINDEX xofs = static_cast<CHANNELINDEX>(GetXScrollPos());
 	ROWINDEX yofs = static_cast<ROWINDEX>(GetYScrollPos());
 	const CSoundFile &sndFile = pModDoc->GetSoundFile();
-	const UINT nColumnWidth = m_szCell.cx;
 	const UINT numChannels = sndFile.GetNumChannels();
 	int ypaint = rcClient.top + m_szHeader.cy - GetSmoothScrollOffset();
 	const auto &order = Order();
@@ -890,7 +888,6 @@ void CViewPattern::OnDraw(CDC *pDC)
 	}
 
 	DrawAutomationLanes(hdc, false, lineWidth);
-	const auto buttonBrush = GetSysColorBrush(COLOR_BTNFACE), blackBrush = GetStockBrush(BLACK_BRUSH);
 	rect.SetRect(0, rcClient.top, rcClient.right, rcClient.top + m_szHeader.cy);
 	if(pDC->RectVisible(rect))
 	{
@@ -914,7 +911,6 @@ void CViewPattern::OnDraw(CDC *pDC)
 				if(!pDC->RectVisible(rect))
 					continue;
 				const auto &channel = sndFile.ChnSettings[chn];
-				const auto recordGroup = pModDoc->GetChannelRecordGroup(static_cast<CHANNELINDEX>(chn));
 				const char *pszfmt = sndFile.m_bChannelMuteTogglePending[chn]? "[Channel %u]" : "Channel %u";
 				if(channel.szName[0] != 0)
 					pszfmt = sndFile.m_bChannelMuteTogglePending[chn] ? "%u: [%s]" : "%u: %s";
@@ -929,8 +925,8 @@ void CViewPattern::OnDraw(CDC *pDC)
 				auto nameRect = GetTrackControlRect(static_cast<CHANNELINDEX>(chn), DragItem::ChannelHeader);
 				DrawButtonRect(m_offScreenDC, lineWidth, nameRect, s,
 					channel.dwFlags[CHN_MUTE],
-					m_bInItemRect && m_nDragItem.Type() == DragItem::ChannelHeader && m_nDragItem.Value() == chn,
-					recordGroup != RecordGroup::NoGroup ? DT_RIGHT : DT_CENTER, chanColorHeight);
+					(m_bInItemRect && m_nDragItem.Type() == DragItem::ChannelHeader && m_nDragItem.Value() == chn) || m_trackSelection.Contains(chn),
+					DT_CENTER, chanColorHeight);
 
 				if(channel.color != ModChannelSettings::INVALID_COLOR)
 				{
@@ -962,28 +958,23 @@ void CViewPattern::OnDraw(CDC *pDC)
 					::FillRect(m_offScreenDC, r, dcBrush);
 				}
 
-				rect.bottom = rect.top + colHeight;
-				rect.top += chanColorHeight;
-
-				if(recordGroup != RecordGroup::NoGroup)
+				if(m_trackSelection.Contains(chn))
 				{
-					CRect insRect;
-					insRect.SetRect(xpaint, ypaint + chanColorHeight, xpaint + nColumnWidth / 8 + recordInsX, ypaint + colHeight);
-					FrameRect(m_offScreenDC, &rect, buttonBrush);
-					InvertRect(m_offScreenDC, &rect);
-					s[0] = (recordGroup == RecordGroup::Group1) ? '1' : '2';
-					s[1] = '\0';
-					DrawButtonRect(m_offScreenDC, lineWidth, insRect, s, false, false, DT_CENTER);
-					FrameRect(m_offScreenDC, &insRect, blackBrush);
+					::SetDCBrushColor(m_offScreenDC, GetSysColor(COLOR_HIGHLIGHT));
+					CRect edge(nameRect.left, nameRect.bottom - lineWidth * 2, nameRect.right, nameRect.bottom);
+					::FillRect(m_offScreenDC, edge, dcBrush);
+					edge.SetRect(nameRect.left, nameRect.top + chanColorHeight, nameRect.left + lineWidth, nameRect.bottom);
+					::FillRect(m_offScreenDC, edge, dcBrush);
+					edge.SetRect(nameRect.right - lineWidth, nameRect.top + chanColorHeight, nameRect.right, nameRect.bottom);
+					::FillRect(m_offScreenDC, edge, dcBrush);
 				}
 
 				DrawTrackControls(m_offScreenDC, static_cast<CHANNELINDEX>(chn), lineWidth);
-				rect.bottom = MulDiv(TrackNameHeight + TrackControlHeight * 2, m_dpi, 96);
+				rect.top = rect.bottom = GetTrackHeaderHeight();
 				if(m_Status[psShowVUMeters])
 				{
 					m_chnState[chn].vuMeterOld = 0;
 					DrawChannelVUMeter(m_offScreenDC, rect.left, rect.bottom, chn);
-					rect.top += vuHeight;
 					rect.bottom += vuHeight;
 				}
 				if(m_Status[psShowPluginNames])
@@ -2088,7 +2079,7 @@ void CViewPattern::UpdateAllVUMeters(Notification *pnotify)
 	int x = m_szHeader.cx;
 	CHANNELINDEX nChn = static_cast<CHANNELINDEX>(xofs);
 	const CHANNELINDEX numChannels = std::min(pModDoc->GetNumChannels(), static_cast<CHANNELINDEX>(m_chnState.size()));
-	const int yPos = MulDiv(TrackNameHeight + TrackControlHeight * 2, m_dpi, 96);
+	const int yPos = GetTrackHeaderHeight();
 	while(nChn < numChannels && x < rcClient.right)
 	{
 		m_chnState[nChn].vuMeter = static_cast<uint16>(pnotify->pos[nChn]);

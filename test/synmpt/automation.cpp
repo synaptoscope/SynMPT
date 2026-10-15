@@ -1,6 +1,7 @@
 #include "../../common/stdafx.h"
 #include "../../mptrack/PatternAutomation.h"
 #include "../../soundlib/TrackRouting.h"
+#include "../../mptrack/TrackHeader.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -66,7 +67,39 @@ void RunSynMPTAutomationChecks()
     check(gain.left==0 && gain.right==0,"bus mute");
     tracks[3].parentBus=2;
     check(!VisitTrackBuses(tracks,0,[](CHANNELINDEX){}),"cyclic routes terminate safely");
-	std::cout << "PASS: native automation storage, shared lanes, note/velocity protection, effect collisions, plugin notes, erase, format mappings, line endpoints, nested buses, solo, gain/pan/mute and cycle protection\n";
+
+    TrackHeaderSelection picked;
+    picked.Click(1,6,false,false);picked.Click(4,6,true,false);
+    check(picked.Count()==2 && picked.Contains(1) && picked.Contains(4) && !picked.Contains(2),"Ctrl-click selects non-adjacent tracks");
+    check(picked.Targets(1,6)==picked.Mask(),"selected M/S button uses the entire selection");
+    const auto unrelated=picked.Targets(5,6);
+    check(std::count(unrelated.begin(),unrelated.end(),true)==1 && unrelated[5],"unselected button only affects its own track");
+    picked.Click(2,6,false,true);
+    check(picked.Count()==3 && picked.Contains(2) && picked.Contains(3) && picked.Contains(4) && !picked.Contains(1),"Shift-click selects an anchored range");
+    picked.Click(0,6,true,true);
+    check(picked.Count()==5 && !picked.Contains(5),"Ctrl-Shift adds a range");
+    picked.Click(3,6,false,false);picked.Click(3,6,true,false);
+    check(picked.Count()==0,"Ctrl-click can clear the last selected track");
+    picked.Click(1,6,false,false);picked.Click(5,6,true,false);
+    picked.Remap(std::vector<size_t>{5,4,3,2,1,0});
+    check(picked.Count()==2 && picked.Contains(0) && picked.Contains(4) && picked.Anchor()==0,"selection and range anchor follow reordered tracks");
+    TrackHeaderSelection restored;restored.Restore(picked.Mask(),picked.Anchor());
+    check(restored.Mask()==picked.Mask() && restored.Anchor()==picked.Anchor(),"selection survives a tab round trip");
+    std::vector<ModChannelSettings> band(6);band[3].isBus=true;band[4].isBus=true;
+    band[0].parentBus=3;band[1].parentBus=3;band[3].parentBus=4;
+    const std::vector<bool> isolated{true,false,true,false,false,false};
+    auto audible=TrackSoloSet(band,isolated);
+    check(audible[0] && !audible[1] && audible[2] && audible[3] && audible[4] && !audible[5],"non-adjacent solo excludes the intervening track but keeps parent buses");
+    auto toggled=ToggleTrackSoloSet(std::vector<bool>(6,false),isolated);
+    toggled=ToggleTrackSoloSet(toggled,std::vector<bool>{false,true,false,false,false,false});
+    check(toggled[0] && toggled[1] && toggled[2],"another Solo button adds to the existing solo set");
+    toggled=ToggleTrackSoloSet(toggled,isolated);
+    check(!toggled[0] && toggled[1] && !toggled[2],"batch Solo toggle removes only the targeted solo tracks");
+    toggled=ToggleTrackSoloSet(toggled,std::vector<bool>{false,true,false,false,false,false});
+    check(std::none_of(toggled.begin(),toggled.end(),[](bool soloed){return soloed;}),"last Solo toggle clears the solo set");
+    for(const auto [dpi,panBottom]:std::vector<std::pair<int,int>>{{96,92},{120,117},{144,138},{168,163},{192,184}})
+        check(TrackHeaderLayout(dpi).ControlsBottom()==panBottom,"meter/plugin boundary must follow all five header rows at fractional DPI");
+	std::cout << "PASS: native automation storage, shared lanes, note/velocity protection, effect collisions, plugin notes, erase, format mappings, line endpoints, nested buses, solo, gain/pan/mute, cycle protection, multi-select, additive multi-solo and DPI header bounds\n";
 }
 OPENMPT_NAMESPACE_END
 #ifdef SYNMPT_AUTOMATION_CHECK_MAIN

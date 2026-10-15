@@ -27,18 +27,36 @@ inline bool TrackBelongsToBus(const std::vector<ModChannelSettings> &tracks, CHA
     return VisitTrackBuses(tracks, track, [&](CHANNELINDEX parent) { found |= parent == bus; }) && found;
 }
 
-inline std::vector<bool> TrackSoloSet(const std::vector<ModChannelSettings> &tracks, CHANNELINDEX first, CHANNELINDEX last)
+
+inline std::vector<bool> ToggleTrackSoloSet(const std::vector<bool> &current, const std::vector<bool> &targets)
+{
+    auto result = current; result.resize(targets.size(), false);
+    bool allOn = true;
+    for(size_t index = 0; index < targets.size(); index++) if(targets[index] && !result[index]) allOn = false;
+    for(size_t index = 0; index < targets.size(); index++) if(targets[index]) result[index] = !allOn;
+    return result;
+}
+
+inline std::vector<bool> TrackSoloSet(const std::vector<ModChannelSettings> &tracks, const std::vector<bool> &selected)
 {
     std::vector<bool> audible(tracks.size(), false);
     for(CHANNELINDEX track = 0; track < tracks.size(); track++)
     {
-        audible[track] = track >= first && track <= last;
-        for(CHANNELINDEX bus = first; bus <= last && bus < tracks.size(); bus++)
-            if(tracks[bus].isBus && TrackBelongsToBus(tracks, track, bus)) audible[track] = true;
+        audible[track] = track < selected.size() && selected[track];
+        VisitTrackBuses(tracks, track, [&](CHANNELINDEX bus) {
+            if(bus < selected.size() && selected[bus]) audible[track] = true;
+        });
     }
     for(CHANNELINDEX track = 0; track < tracks.size(); track++)
         if(audible[track]) VisitTrackBuses(tracks, track, [&](CHANNELINDEX bus) { audible[bus] = true; });
     return audible;
+}
+
+inline std::vector<bool> TrackSoloSet(const std::vector<ModChannelSettings> &tracks, CHANNELINDEX first, CHANNELINDEX last)
+{
+    std::vector<bool> selected(tracks.size(), false);
+    for(size_t track = first; track <= last && track < tracks.size(); track++) selected[track] = true;
+    return TrackSoloSet(tracks, selected);
 }
 
 struct TrackBusGain { uint32 left = 65536, right = 65536; };

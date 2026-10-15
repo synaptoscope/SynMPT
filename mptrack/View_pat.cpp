@@ -527,7 +527,8 @@ bool CViewPattern::UpdateScrollbarPositions(bool updateHorizontalScrollbar)
 CRect CViewPattern::GetTrackControlRect(CHANNELINDEX channel, DragItem::DragType type) const
 {
 	const int left = GetTrackLeft(channel), width = GetNoteTrackWidth(channel);
-	const int nameHeight = MulDiv(TrackNameHeight, m_dpi, 96), rowHeight = MulDiv(TrackControlHeight, m_dpi, 96);
+	const auto layout = TrackHeaderLayout(m_dpi);
+	const int nameHeight = layout.nameHeight, rowHeight = layout.rowHeight;
 	const int buttonWidth = std::min(MulDiv(20, m_dpi, 96), std::max(width / 4, 1));
 	CRect rect(left, 0, left + width, nameHeight);
 	switch(type)
@@ -565,6 +566,7 @@ bool CViewPattern::IsTrackSolo(CHANNELINDEX channel) const
 {
 	const auto *file = GetSoundFile();
 	if(!file || channel >= file->GetNumChannels() || file->GetNumChannels() < 2) return false;
+	if(IsTrackSoloMaskActive()) return m_trackSoloTargets[channel];
 	const auto audible = TrackSoloSet(file->ChnSettings, channel, channel);
 	bool hasMuted = false;
 	for(CHANNELINDEX other = 0; other < file->GetNumChannels(); other++)
@@ -1242,9 +1244,20 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 	const auto &sndFile = modDoc->GetSoundFile();
 
 	SetFocus();
+	m_trackHeaderClick = false;
 	const auto control = GetDragItem(point, m_rcDragItem);
 	m_automationContext = false;
 	if(control.Type() != DragItem::PanLane && control.Type() != DragItem::VolumeLane) CancelAutomationLine();
+	if(control.Type() == DragItem::ChannelHeader)
+	{
+		const auto channel = static_cast<CHANNELINDEX>(control.Value());
+		if(!CInputHandler::AltPressed() || !m_trackSelection.Contains(channel)) SelectTrackHeader(channel, nFlags);
+		if(nFlags & (MK_CONTROL | MK_SHIFT))
+		{
+			m_trackHeaderClick = true; m_nDragItem = m_nDropItem = {};
+			m_Status.reset(psDragging); return;
+		}
+	}
 	if(control.Type() == DragItem::ChannelResize)
 	{
 		m_resizingTrack = static_cast<CHANNELINDEX>(control.Value()); m_resizeStartX = point.x;
@@ -1297,16 +1310,13 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 	const FlagSet<PatternSetup> patternSetup = TrackerSettings::Instance().patternSetup;
 	if(m_nDragItem.Type() == DragItem::ChannelHeader)
 	{
-		// Click on channel header
-		if(nFlags & MK_CONTROL)
-			TogglePendingMute(pointCursor.GetChannel());
-		if(nFlags & MK_SHIFT)
-		{
-			// Drag-select record channels
-			StartRecordGroupDragging(m_nDragItem);
-		}
+		// Header modifiers select tracks; record arming has a dedicated button.
 	} else if(point.x >= m_szHeader.cx && point.y > m_szHeader.cy)
 	{
+		// Clicking the note grid returns to its current track selection.
+		if(pointCursor.GetChannel() < sndFile.GetNumChannels())
+			m_trackSelection.Click(pointCursor.GetChannel(), sndFile.GetNumChannels(), false, false);
+		InvalidateChannelsHeaders();
 		// Click on pattern data
 		if(IsLiveRecord() && patternSetup[PatternSetup::DisableFollowOnClick])
 		{
@@ -1423,6 +1433,7 @@ void CViewPattern::OnLButtonDblClk(UINT uFlags, CPoint point)
 
 void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 {
+	if(m_trackHeaderClick) { m_trackHeaderClick = false; return; }
 	if(m_automationClick) { m_automationClick = false; return; }
 	if(m_resizingTrack != CHANNELINDEX_INVALID) { m_resizingTrack = CHANNELINDEX_INVALID; ReleaseCapture(); return; }
 	if(m_automationDragging) { UpdateAutomationStroke(point); EndAutomationStroke(); return; }
@@ -1487,15 +1498,10 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 		if(sourceChn == targetChn && targetChn < modDoc->GetNumChannels())
 		{
 			// Just clicked a channel header...
-			if(nFlags & MK_SHIFT)
-			{
-				// Toggle record state
-				modDoc->ToggleChannelRecordGroup(sourceChn, RecordGroup::Group1);
-				InvalidateChannelsHeaders(sourceChn);
-			} else if(CInputHandler::AltPressed())
+			if(CInputHandler::AltPressed())
 			{
 				// Solo / Unsolo
-				OnSoloChannel(sourceChn, sourceChn);
+				OnSoloTrackSelection(sourceChn);
 			} else if(!(nFlags & MK_CONTROL))
 			{
 				// Select the track; muting has its own button in the header.
@@ -1515,7 +1521,7 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 
 	case DragItem::ChannelMute:
 		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels())
-			OnMuteChannel(sourceChn);
+			OnMuteTrackSelection(sourceChn);
 		break;
 
 	case DragItem::ChannelRecord:
@@ -1524,7 +1530,7 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 		break;
 	case DragItem::ChannelSolo:
 		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels())
-			OnSoloChannel(sourceChn, sourceChn);
+			OnSoloTrackSelection(sourceChn);
 		break;
 
 	case DragItem::PatternHeader:
@@ -1569,6 +1575,10 @@ void CViewPattern::DragChannel(CHANNELINDEX source, CHANNELINDEX target, CHANNEL
 	const auto previousStates = m_chnState;
 	if(modified && modDoc->ReArrangeChannels(channels) != CHANNELINDEX_INVALID)
 	{
+		m_trackSelection.Remap(channels);
+		TrackHeaderSelection soloState;
+		soloState.Restore(m_trackSoloTargets, TrackHeaderSelection::Invalid); soloState.Remap(channels);
+		m_trackSoloTargets = soloState.Mask();
 		m_chnState.resize(newChannels);
 		for(CHANNELINDEX channel = 0; channel < newChannels; channel++)
 		{
@@ -2107,7 +2117,7 @@ void CViewPattern::ResetChannel(CHANNELINDEX chn)
 
 void CViewPattern::OnMuteFromClick()
 {
-	OnMuteChannel(m_MenuCursor.GetChannel());
+	OnMuteTrackSelection(m_MenuCursor.GetChannel());
 }
 
 
@@ -2126,49 +2136,72 @@ void CViewPattern::OnMuteChannel(CHANNELINDEX chn)
 
 void CViewPattern::OnSoloFromClick()
 {
-	OnSoloChannel(m_MenuCursor.GetChannel(), m_MenuCursor.GetChannel());
+	OnSoloTrackSelection(m_MenuCursor.GetChannel());
 }
 
 
-// When trying to solo a channel that is already the only unmuted channel,
-// this will result in unmuting all channels, in order to satisfy user habits.
-// In all other cases, soloing a channel unsolos all and mutes all except this channel
+void CViewPattern::SelectTrackHeader(CHANNELINDEX channel, UINT flags)
+{
+    const auto count = GetDocument()->GetNumChannels();
+    m_trackSelection.Click(channel, count, (flags & MK_CONTROL) != 0, (flags & MK_SHIFT) != 0);
+    // Keep keyboard Mute/Solo on the remaining selection after Ctrl-deselect.
+    if(!m_trackSelection.Contains(channel) && m_trackSelection.Count())
+        channel = static_cast<CHANNELINDEX>(std::find(m_trackSelection.Mask().begin(), m_trackSelection.Mask().end(), true) - m_trackSelection.Mask().begin());
+    m_Cursor.SetColumn(channel, m_Cursor.GetColumnType()); SetSelToCursor();
+    InvalidateChannelsHeaders(); UpdateIndicator();
+}
+
+void CViewPattern::OnMuteTrackSelection(CHANNELINDEX channel)
+{
+    auto *doc = GetDocument(); if(!doc || channel >= doc->GetNumChannels()) return;
+    const auto selected = m_trackSelection.Targets(channel, doc->GetNumChannels());
+    const bool muted = !doc->IsChannelMuted(channel);
+    for(CHANNELINDEX track = 0; track < doc->GetNumChannels(); track++)
+        if(selected[track]) doc->MuteChannel(track, muted);
+    InvalidateChannelsHeaders(); doc->UpdateAllViews(this, GeneralHint().Channels()); UpdateIndicator();
+}
+
+void CViewPattern::OnSoloTrackSelection(CHANNELINDEX channel)
+{
+    if(!GetDocument() || channel >= GetDocument()->GetNumChannels()) return;
+    const auto count = GetDocument()->GetNumChannels();
+    const auto current = IsTrackSoloMaskActive() ? m_trackSoloTargets : std::vector<bool>(count, false);
+    const auto next = ToggleTrackSoloSet(current, m_trackSelection.Targets(channel, count));
+    if(std::none_of(next.begin(), next.end(), [](bool pick) { return pick; })) { OnUnmuteAll(); return; }
+    SoloTrackMask(next, false);
+}
+
+bool CViewPattern::IsTrackSoloMaskActive() const
+{
+    const auto *doc = GetDocument();
+    if(!doc || m_trackSoloTargets.size() != doc->GetNumChannels()
+        || std::none_of(m_trackSoloTargets.begin(), m_trackSoloTargets.end(), [](bool pick) { return pick; })) return false;
+    const auto audible = TrackSoloSet(GetSoundFile()->ChnSettings, m_trackSoloTargets);
+    for(CHANNELINDEX track = 0; track < doc->GetNumChannels(); track++)
+        if(audible[track] == doc->IsChannelMuted(track)) return false;
+    return true;
+}
+
+void CViewPattern::SoloTrackMask(const std::vector<bool> &selected, bool toggle)
+{
+    auto *doc = GetDocument(); if(!doc || std::none_of(selected.begin(), selected.end(), [](bool pick) { return pick; })) return;
+    const auto audible = TrackSoloSet(GetSoundFile()->ChnSettings, selected);
+    bool alreadySolo = true;
+    for(CHANNELINDEX track = 0; track < doc->GetNumChannels(); track++)
+        if(audible[track] == doc->IsChannelMuted(track)) { alreadySolo = false; break; }
+    if(toggle && alreadySolo) { OnUnmuteAll(); return; }
+    m_trackSoloTargets = selected;
+    for(CHANNELINDEX track = 0; track < doc->GetNumChannels(); track++) doc->MuteChannel(track, !audible[track]);
+    InvalidateChannelsHeaders(); doc->UpdateAllViews(this, GeneralHint().Channels()); UpdateIndicator();
+}
+
+// Keep the native contiguous pattern-selection command working alongside header selection.
 void CViewPattern::OnSoloChannel(CHANNELINDEX first, CHANNELINDEX last)
 {
-	CModDoc *pModDoc = GetDocument();
-	if(pModDoc == nullptr)
-		return;
-
-	if(first >= pModDoc->GetNumChannels() || last < first)
-	{
-		return;
-	}
-
-	const auto audible = TrackSoloSet(GetSoundFile()->ChnSettings, first, last);
-	bool isAlreadySolo = true;
-	for(CHANNELINDEX i = 0; i < pModDoc->GetNumChannels(); i++)
-	{
-		if(audible[i] == pModDoc->IsChannelMuted(i))
-		{
-			isAlreadySolo = false;
-			break;
-		}
-	}
-	if(isAlreadySolo)
-	{
-		OnUnmuteAll();
-		return;
-	}
-
-	for(CHANNELINDEX i = 0; i < pModDoc->GetNumChannels(); i++)
-	{
-		pModDoc->MuteChannel(i, !audible[i]);
-	}
-	InvalidateChannelsHeaders();
-	if(first == last)
-		pModDoc->UpdateAllViews(this, GeneralHint(first).Channels());
-	else
-		pModDoc->UpdateAllViews(this, GeneralHint().Channels());
+    if(!GetDocument() || first >= GetDocument()->GetNumChannels() || last < first) return;
+    std::vector<bool> selected(GetDocument()->GetNumChannels(), false);
+    for(CHANNELINDEX track = first; track <= last && track < selected.size(); track++) selected[track] = true;
+    SoloTrackMask(selected);
 }
 
 
@@ -2204,6 +2237,7 @@ void CViewPattern::OnSplitRecordSelect()
 
 void CViewPattern::OnUnmuteAll()
 {
+	m_trackSoloTargets.clear();
 	CModDoc *pModDoc = GetDocument();
 	if(pModDoc)
 	{
@@ -4534,6 +4568,8 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 		{
 			PatternViewState *pState = (PatternViewState *)lParam;
 			m_chnState.resize(GetDocument()->GetNumChannels());
+			m_trackSelection.Restore(pState->selectedTracks, pState->trackSelectionAnchor);
+			m_trackSoloTargets = pState->soloTracks;
 			for(size_t channel = 0; channel < std::min(m_chnState.size(), pState->automationLanes.size()); channel++)
 			{
 				m_chnState[channel].panExpanded = (pState->automationLanes[channel] & 1) != 0;
@@ -4565,6 +4601,9 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 			pState->selection = m_Selection;
 			pState->nOrder = GetCurrentOrder();
 			pState->visibleColumns = m_visibleColumns;
+			pState->selectedTracks = m_trackSelection.Mask();
+			pState->soloTracks = m_trackSoloTargets;
+			pState->trackSelectionAnchor = static_cast<CHANNELINDEX>(m_trackSelection.Anchor());
 			pState->defaultTrackWidth = static_cast<uint16>(m_defaultTrackWidth);
 			pState->trackWidths.resize(m_chnState.size());
 			for(size_t channel = 0; channel < m_chnState.size(); channel++) pState->trackWidths[channel] = static_cast<uint16>(m_chnState[channel].widthDip);
@@ -4726,10 +4765,14 @@ LRESULT CViewPattern::OnCustomKeyMsg(WPARAM wParam, LPARAM lParam)
 		case kcCursorCopy:            OnCursorCopy(); return wParam;
 		case kcCursorPaste:           OnCursorPaste(); return wParam;
 		case kcChannelMute:
+			if(m_trackSelection.Count() > 1) { OnMuteTrackSelection(GetCurrentChannel()); return wParam; }
 			for(CHANNELINDEX c = m_Selection.GetStartChannel(); c <= m_Selection.GetEndChannel(); c++)
 				OnMuteChannel(c);
 			return wParam;
-		case kcChannelSolo:      OnSoloChannel(m_Selection.GetStartChannel(), m_Selection.GetEndChannel()); return wParam;
+		case kcChannelSolo:
+			if(m_trackSelection.Count() > 1 || m_Selection.GetStartChannel() == m_Selection.GetEndChannel()) OnSoloTrackSelection(GetCurrentChannel());
+			else OnSoloChannel(m_Selection.GetStartChannel(), m_Selection.GetEndChannel());
+			return wParam;
 		case kcChannelUnmuteAll: OnUnmuteAll(); return wParam;
 		case kcToggleChanMuteOnPatTransition:
 			for(CHANNELINDEX c = m_Selection.GetStartChannel(); c <= m_Selection.GetEndChannel(); c++)
@@ -6918,7 +6961,8 @@ bool CViewPattern::BuildPluginCtxMenu(HMENU hMenu, UINT nChn, const CSoundFile &
 
 bool CViewPattern::BuildSoloMuteCtxMenu(HMENU hMenu, CInputHandler *ih, UINT nChn, const CSoundFile &sndFile) const
 {
-	AppendMenu(hMenu, sndFile.ChnSettings[nChn].dwFlags[CHN_MUTE] ? (MF_STRING | MF_CHECKED) : MF_STRING, ID_PATTERN_MUTE, ih->GetKeyTextFromCommand(kcChannelMute, _T("&Mute Channel")));
+	const bool multiple = m_trackSelection.Contains(nChn) && m_trackSelection.Count() > 1;
+	AppendMenu(hMenu, sndFile.ChnSettings[nChn].dwFlags[CHN_MUTE] ? (MF_STRING | MF_CHECKED) : MF_STRING, ID_PATTERN_MUTE, ih->GetKeyTextFromCommand(kcChannelMute, multiple ? _T("&Mute Selected Tracks") : _T("&Mute Track")));
 	bool solo = false, unmuteAll = false;
 	bool soloPending = false, unmuteAllPending = false;  // doesn't work perfectly yet
 
@@ -6943,7 +6987,7 @@ bool CViewPattern::BuildSoloMuteCtxMenu(HMENU hMenu, CInputHandler *ih, UINT nCh
 			unmuteAllPending = true;
 	}
 	if(solo)
-		AppendMenu(hMenu, MF_STRING, ID_PATTERN_SOLO, ih->GetKeyTextFromCommand(kcChannelSolo, _T("&Solo Channel")));
+		AppendMenu(hMenu, MF_STRING, ID_PATTERN_SOLO, ih->GetKeyTextFromCommand(kcChannelSolo, multiple ? _T("&Solo Selected Tracks") : _T("&Solo Track")));
 	if(unmuteAll)
 		AppendMenu(hMenu, MF_STRING, ID_PATTERN_UNMUTEALL, ih->GetKeyTextFromCommand(kcChannelUnmuteAll, _T("&Unmute All")));
 
@@ -7923,7 +7967,7 @@ INT_PTR CViewPattern::OnToolHitTest(CPoint point, TOOLINFO *pTI) const
 				text = MPT_TFORMAT("{}: {}")(value + 1, mpt::ToWin(sndFile.GetCharsetInternal(), sndFile.ChnSettings[value].szName));
 			else
 				text = MPT_TFORMAT("Channel {}")(value + 1);
-			text += _T(". Double-click to edit name and color; drag to move track.");
+			text += _T(". Ctrl-click selects individual tracks; Shift-click selects a range. Double-click edits name/color; drag moves the track.");
 		}
 		break;
 	case DragItem::ChannelVolume:
@@ -7939,7 +7983,7 @@ INT_PTR CViewPattern::OnToolHitTest(CPoint point, TOOLINFO *pTI) const
 		}
 		break;
 	case DragItem::ChannelMute:
-		text = _T("Mute / unmute track");
+		text = _T("Mute / unmute the selected tracks. Clicking M on an unselected track affects only that track.");
 		break;
 	case DragItem::ChannelRecord:
 		text = _T("Arm this track for step or MIDI note entry");
@@ -7954,7 +7998,7 @@ INT_PTR CViewPattern::OnToolHitTest(CPoint point, TOOLINFO *pTI) const
 		text = _T("Drag to resize this track. Ctrl-wheel changes all widths; Shift-wheel changes the selected track.");
 		break;
 	case DragItem::ChannelSolo:
-		text = _T("Solo / unsolo track (keeps its group outputs audible)");
+		text = _T("Toggle Solo for the selected tracks; other soloed tracks stay included. Group outputs remain audible.");
 		break;
 	case DragItem::PanLane:
 	case DragItem::VolumeLane:
@@ -8025,6 +8069,7 @@ HRESULT CViewPattern::get_accName(VARIANT varChild, BSTR *pszName)
 	str.Replace(_T("%column_description%"), GetCursorDescription());
 	str.Replace(_T("%channel_name%"), channelName);
 
+	str += MPT_CFORMAT(", {} tracks selected")(m_trackSelection.Count());
 	str += MPT_CFORMAT(", track width {}, {}")(GetNoteTrackWidth(chn), GetTrackInstrumentLabel(chn));
 	if(sndFile->ChnSettings[chn].isBus) str += _T(", group bus");
 	if(sndFile->ChnSettings[chn].parentBus < sndFile->GetNumChannels()) str += MPT_CFORMAT(", output group {}")(sndFile->ChnSettings[chn].parentBus + 1);
@@ -8204,18 +8249,24 @@ void CViewPattern::ShowTrackRoutingMenu(CHANNELINDEX channel)
 void CViewPattern::CreateGroupBus()
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile();
-    const auto first = m_Selection.GetStartChannel(), last = m_Selection.GetEndChannel();
     const auto count = file.GetNumChannels();
+    std::vector<bool> members(count, false);
+    if(m_trackSelection.Count() > 1 && m_trackSelection.Size() == count) members = m_trackSelection.Mask();
+    else for(CHANNELINDEX track = m_Selection.GetStartChannel(); track <= m_Selection.GetEndChannel() && track < count; track++) members[track] = true;
+    const auto first = static_cast<CHANNELINDEX>(std::find(members.begin(), members.end(), true) - members.begin());
     if(first >= count || count >= file.GetModSpecifications().channelsMax) return;
-	for(CHANNELINDEX track = 0; track < count; track++)
-	{
-		bool selected = track >= first && track <= last;
-		for(CHANNELINDEX bus = first; bus <= last && bus < count; bus++)
-			if(file.ChnSettings[bus].isBus && TrackBelongsToBus(file.ChnSettings, track, bus)) selected = true;
-		if(selected && !CanGroupTrack(track))
-		{ Reporting::Information(_T("Group buses currently support sample instruments. One selected track uses an external plugin, effect, MIDI output or FM instrument.")); return; }
-	}
-	CInputDlg name(this, _T("Name for the new group bus:"), _T("Group"), MAX_CHANNELNAME - 1);
+    const bool hadSolo = IsTrackSoloMaskActive();
+    auto roots = members;
+    for(CHANNELINDEX track = 0; track < count; track++)
+    {
+        bool selected = members[track];
+        VisitTrackBuses(file.ChnSettings, track, [&](CHANNELINDEX bus) {
+            if(members[bus]) { selected = true; roots[track] = false; }
+        });
+        if(selected && !CanGroupTrack(track))
+        { Reporting::Information(_T("Group buses currently support sample instruments. One selected track uses an external plugin, effect, MIDI output or FM instrument.")); return; }
+    }
+    CInputDlg name(this, _T("Name for the new group bus:"), _T("Group"), MAX_CHANNELNAME - 1);
     if(name.DoModal() != IDOK) return;
     std::vector<CHANNELINDEX> order(count + 1);
     for(CHANNELINDEX channel = 0; channel <= count; channel++) order[channel] = channel < first ? channel : channel == first ? CHANNELINDEX_INVALID : channel - 1;
@@ -8225,10 +8276,15 @@ void CViewPattern::CreateGroupBus()
         auto &bus = file.ChnSettings[first]; bus.isBus = true;
         bus.nVolume = 64; bus.nPan = 128;
         bus.szName = mpt::ToCharset(file.GetCharsetInternal(), mpt::ToUnicode(name.resultAsString));
-        for(CHANNELINDEX channel = first + 1; channel <= std::min<CHANNELINDEX>(last + 1, count); channel++) file.ChnSettings[channel].parentBus = first;
+        for(CHANNELINDEX source = 0; source < count; source++)
+            if(roots[source]) file.ChnSettings[source < first ? source : source + 1].parentBus = first;
         doc->InitChannel(first);
     }
     m_chnState.insert(m_chnState.begin() + first, ChannelState{});
+    m_trackSelection.Click(first, count + 1, false, false);
+    TrackHeaderSelection soloState; soloState.Restore(m_trackSoloTargets, TrackHeaderSelection::Invalid); soloState.Remap(order);
+    m_trackSoloTargets = soloState.Mask();
+    if(hadSolo) SoloTrackMask(m_trackSoloTargets, false);
     m_automationPresenceDirty = true;
     doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels().ModType());
     SetCurrentColumn(first, m_Cursor.GetColumnType()); SetSelToCursor(); UpdateScrollSize(); InvalidatePattern(true, true);
