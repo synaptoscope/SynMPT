@@ -118,6 +118,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWnd)
 	ON_COMMAND_EX(IDD_TREEVIEW,         &CMainFrame::OnBarCheck)
 	ON_COMMAND(ID_VIEW_TRANSPORT,       &CMainFrame::OnViewTransport)
 	ON_COMMAND(ID_TRANSPORT_BRING_HERE,  &CMainFrame::OnBringTransportHere)
+	ON_COMMAND(ID_TRANSPORT_DOCK,        &CMainFrame::OnDockTransport)
 	ON_COMMAND_EX(ID_NETLINK_MODPLUG,   &CMainFrame::OnInternetLink)
 	ON_COMMAND_EX(ID_NETLINK_TOP_PICKS, &CMainFrame::OnInternetLink)
 
@@ -257,7 +258,9 @@ void CMainFrame::Initialize()
 	// Floating bars can paint immediately during restoration. The application now
 	// owns this main frame, and its controls, colors and playback services are ready.
 	RemoveControlBar(&m_wndStatusBar);
+	RemoveControlBar(&m_wndDocumentTabs);
 	LoadBarState(_T("Toolbars"));
+	AddControlBar(&m_wndDocumentTabs);
 	AddControlBar(&m_wndStatusBar);
 
 	CreateExampleModulesMenu();
@@ -317,6 +320,8 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 
 	// Pattern note bitmap
 	bmpNotes = LoadDib(MAKEINTRESOURCE(IDB_PATTERNVIEW));
+	// Tabs reserve their own row above all docked toolbars.
+	if(!m_wndDocumentTabs.Create(this)) return -1;
 	// Toolbars
 	EnableDocking(CBRS_ALIGN_ANY);
 	if (!m_wndToolBar.Create(this)) return -1;
@@ -676,6 +681,7 @@ BOOL CMainFrame::PreTranslateMessage(MSG *pMsg)
 
 void CMainFrame::OnUpdateFrameTitle(BOOL bAddToTitle)
 {
+	RefreshDocumentTabs();
 	if ((GetStyle() & FWS_ADDTOTITLE) == 0)	return;     // leave it alone!
 
 	CMDIChildWnd* pActiveChild = nullptr;
@@ -706,8 +712,17 @@ void CMainFrame::OnUpdateFrameTitle(BOOL bAddToTitle)
 }
 
 
+void CMainFrame::RefreshDocumentTabs()
+{
+    if(!m_unloading) m_wndDocumentTabs.RequestRefresh();
+}
+
+
 void CMainFrame::RecalcLayout(BOOL notify)
 {
+    // MFC lays out control bars in sibling order; keep tabs above the dock site.
+    if(m_wndDocumentTabs.m_hWnd && GetTopWindow() != &m_wndDocumentTabs)
+        m_wndDocumentTabs.SetWindowPos(&wndTop, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	CMDIFrameWnd::RecalcLayout(notify);
 	if(m_quickStartDlg && m_quickStartDlg->m_hWnd)
 	{
@@ -2753,6 +2768,20 @@ void CMainFrame::OnBringTransportHere()
 }
 
 
+void CMainFrame::OnDockTransport()
+{
+    // Each existing toolbar keeps its controls and can still be floated separately.
+    ShowControlBar(&m_wndToolBar, TRUE, FALSE);
+    DockControlBar(&m_wndToolBar, AFX_IDW_DOCKBAR_TOP);
+    RecalcLayout();
+    CRect rect; m_wndToolBar.GetWindowRect(rect);
+    rect.OffsetRect(rect.Width(), 0);
+    ShowControlBar(&m_wndTransport, TRUE, FALSE);
+    DockControlBar(&m_wndTransport, AFX_IDW_DOCKBAR_TOP, rect);
+    RecalcLayout();
+}
+
+
 void CMainFrame::ShowTransport(bool resetPosition)
 {
 	// A transport with all of its button groups hidden cannot be recovered visibly.
@@ -2802,6 +2831,7 @@ void CMainFrame::AddToolBarMenuEntries(CMenu &menu) const
 	menu.AppendMenu(MF_STRING, ID_VIEW_TOOLBAR, m_InputHandler->GetMenuText(ID_VIEW_TOOLBAR));
 	menu.AppendMenu(MF_STRING, ID_VIEW_TRANSPORT, _T("&Transport"));
 	menu.AppendMenu(MF_STRING, ID_TRANSPORT_BRING_HERE, _T("Bring Transport &Here"));
+	menu.AppendMenu(MF_STRING, ID_TRANSPORT_DOCK, _T("Dock Transport Beside Toolbar"));
 	menu.AppendMenu(MF_STRING, IDD_TREEVIEW, m_InputHandler->GetMenuText(IDD_TREEVIEW));
 	menu.AppendMenu(MF_STRING | (TrackerSettings::Instance().treeViewOnLeft ? MF_CHECKED : 0), ID_TREEVIEW_ON_LEFT, _T("Tree View on &Left"));
 
@@ -3054,12 +3084,12 @@ void CMainFrame::OnShowWindow(BOOL bShow, UINT /*nStatus*/)
 		wpl = theApp.GetSettings().Read<WINDOWPLACEMENT>(U_("Display"), U_("WindowPlacement"), wpl);
 		HighDPISupport::SetWindowPlacement(m_hWnd, wpl);
 
-		// First-run placement follows the restored main window position.
-		if(theApp.GetProfileInt(_T("Toolbars"), _T("SynMPTTransport"), 0) < 2)
-		{
-			ShowTransport(true);
-			theApp.WriteProfileInt(_T("Toolbars"), _T("SynMPTTransport"), 2);
-		}
+        // Migrate the older two-row/floating default once, then retain user placement.
+        if(theApp.GetProfileInt(_T("Toolbars"), _T("SynMPTDocumentWorkspace"), 0) < 1)
+        {
+            OnDockTransport();
+            theApp.WriteProfileInt(_T("Toolbars"), _T("SynMPTDocumentWorkspace"), 1);
+        }
 	}
 }
 

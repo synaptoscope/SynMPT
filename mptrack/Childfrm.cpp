@@ -161,6 +161,7 @@ BOOL CChildFrame::OnNcActivate(BOOL bActivate)
 void CChildFrame::OnMDIActivate(BOOL bActivate, CWnd *pActivateWnd, CWnd *pDeactivateWnd)
 {
 	CMDIChildWnd::OnMDIActivate(bActivate, pActivateWnd, pDeactivateWnd);
+	CMainFrame::GetMainFrame()->RefreshDocumentTabs();
 
 	if(bActivate)
 	{
@@ -214,6 +215,7 @@ void CChildFrame::OnUpdateFrameTitle(BOOL bAddToTitle)
 {
 	// update our parent window first
 	GetMDIFrame()->OnUpdateFrameTitle(bAddToTitle);
+	CMainFrame::GetMainFrame()->RefreshDocumentTabs();
 
 	if ((GetStyle() & FWS_ADDTOTITLE) == 0)	return;     // leave child window alone!
 
@@ -385,6 +387,7 @@ void CChildFrame::OnDestroy()
 	if(m_lastActiveFrame == this)
 		m_lastActiveFrame = nullptr;
 	CMDIChildWnd::OnDestroy();
+	CMainFrame::GetMainFrame()->RefreshDocumentTabs();
 }
 
 

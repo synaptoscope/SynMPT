@@ -1346,6 +1346,8 @@
 #define ID_TRACK_NARROWER_SELECTED      44664
 #define ID_TRACK_INSTRUMENT             44665
 #define ID_TRACK_GROUP_OUTPUT           44666
+#define ID_TRANSPORT_DOCK               44667
+#define IDW_SYN_DOCUMENT_TABS           0xE803
 
 // Next default values for new objects
 // 
@@ -1353,7 +1355,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_3D_CONTROLS                     1
 #define _APS_NEXT_RESOURCE_VALUE        543
-#define _APS_NEXT_COMMAND_VALUE         44667
+#define _APS_NEXT_COMMAND_VALUE         44668
 #define _APS_NEXT_CONTROL_VALUE         2518
 #define _APS_NEXT_SYMED_VALUE           901
 #endif

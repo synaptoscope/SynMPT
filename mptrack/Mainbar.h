@@ -167,6 +167,52 @@ protected:
 };
 
 
+// One row of song tabs, independent of the dockable editor/transport bars.
+class CDocumentTabBar;
+class CDocumentTabCtrl : public CTabCtrl
+{
+    CDocumentTabBar &m_owner;
+    HWND m_pressedClose = nullptr;
+    CString m_tooltipText;
+public:
+    explicit CDocumentTabCtrl(CDocumentTabBar &owner) : m_owner(owner) { }
+    CRect CloseRect(int index) const;
+protected:
+    void DrawItem(LPDRAWITEMSTRUCT item) override;
+    INT_PTR OnToolHitTest(CPoint point, TOOLINFO *info) const override;
+    afx_msg void OnLButtonDown(UINT flags, CPoint point);
+    afx_msg void OnLButtonUp(UINT flags, CPoint point);
+    afx_msg void OnMButtonUp(UINT flags, CPoint point);
+    afx_msg void OnCaptureChanged(CWnd *window);
+    afx_msg BOOL OnToolTipText(UINT, NMHDR *header, LRESULT *result);
+    DECLARE_MESSAGE_MAP()
+};
+
+class CDocumentTabBar : public CControlBar
+{
+    friend class CDocumentTabCtrl;
+    struct Entry { HWND frame; CString title, tooltip; };
+    CDocumentTabCtrl m_tabs{*this};
+    std::vector<Entry> m_entries;
+    CFont m_font;
+    bool m_refreshPending = false;
+public:
+    BOOL Create(CWnd *parent);
+    void RequestRefresh();
+protected:
+    CSize CalcFixedLayout(BOOL stretch, BOOL horizontal) override;
+    void OnUpdateCmdUI(CFrameWnd *, BOOL) override { }
+    void RefreshMetrics();
+    HWND FrameAt(int index) const;
+    void CloseTab(int index);
+    afx_msg void OnSize(UINT type, int width, int height);
+    afx_msg void OnSelectionChanged(NMHDR *, LRESULT *result);
+    afx_msg LRESULT OnRefresh(WPARAM, LPARAM);
+    afx_msg LRESULT OnDPIChangedAfterParent(WPARAM, LPARAM);
+    DECLARE_MESSAGE_MAP()
+};
+
+
 class CModTreeBar: public CDialogBar
 {
 public:

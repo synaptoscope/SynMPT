@@ -198,6 +198,7 @@ public:
 	CImageListEx m_SampleIcons;								// Sample editor icons
 
 protected:
+	CDocumentTabBar m_wndDocumentTabs;
 	CModTreeBar m_wndTree;
 	CStatusBar m_wndStatusBar;
 	CMainToolBar m_wndToolBar;
@@ -391,6 +392,7 @@ public:
 	void NotifyAccessibilityUpdate(CWnd &source);
 
 	void UpdateDocumentCount();
+	void RefreshDocumentTabs();
 
 // Overrides
 protected:
@@ -497,6 +499,7 @@ protected:
 	afx_msg void OnViewTransport();
 	afx_msg void OnUpdateViewTransport(CCmdUI *cmdUI);
 	afx_msg void OnBringTransportHere();
+	afx_msg void OnDockTransport();
 	void ShowTransport(bool resetPosition);
 
 	afx_msg void OnCreateMixerDump();

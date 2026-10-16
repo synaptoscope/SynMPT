@@ -10,6 +10,7 @@
 
 #include "stdafx.h"
 #include "Mainbar.h"
+#include "Childfrm.h"
 #include "HighDPISupport.h"
 #include "ImageLists.h"
 #include "InputHandler.h"
@@ -1819,5 +1820,220 @@ void CStereoVU::OnLButtonDown(UINT, CPoint)
 	}
 }
 
+
+
+// Song tabs keep using the existing MDI documents and their save/close lifecycle.
+static constexpr UINT WM_DOCUMENT_TABS_REFRESH = WM_USER + 2;
+static constexpr UINT DOCUMENT_TABS_CONTROL = 1;
+
+BEGIN_MESSAGE_MAP(CDocumentTabCtrl, CTabCtrl)
+    ON_WM_LBUTTONDOWN()
+    ON_WM_LBUTTONUP()
+    ON_WM_MBUTTONUP()
+    ON_WM_CAPTURECHANGED()
+    ON_NOTIFY_EX_RANGE(TTN_NEEDTEXT, 0, 0xFFFF, &CDocumentTabCtrl::OnToolTipText)
+END_MESSAGE_MAP()
+
+CRect CDocumentTabCtrl::CloseRect(int index) const
+{
+    CRect rect(0, 0, 0, 0);
+    if(index < 0 || index >= GetItemCount() || !GetItemRect(index, rect)) return rect;
+    const int size = HighDPISupport::ScalePixels(16, m_hWnd);
+    rect.left = rect.right - HighDPISupport::ScalePixels(6, m_hWnd) - size;
+    rect.top += (rect.Height() - size) / 2;
+    rect.right = rect.left + size; rect.bottom = rect.top + size;
+    return rect;
+}
+
+void CDocumentTabCtrl::DrawItem(LPDRAWITEMSTRUCT item)
+{
+    const int index = static_cast<int>(item->itemID);
+    if(index < 0 || index >= static_cast<int>(m_owner.m_entries.size())) return;
+    CDC dc; dc.Attach(item->hDC);
+    const bool active = index == GetCurSel();
+    CRect rect(item->rcItem); rect.DeflateRect(2, 2);
+    dc.FillSolidRect(rect, GetSysColor(active ? COLOR_WINDOW : COLOR_BTNFACE));
+    auto *oldFont = dc.SelectObject(GetFont());
+    dc.SetBkMode(TRANSPARENT); dc.SetTextColor(GetSysColor(COLOR_BTNTEXT));
+    CRect text(rect); text.left += HighDPISupport::ScalePixels(8, m_hWnd);
+    text.right = CloseRect(index).left - HighDPISupport::ScalePixels(4, m_hWnd);
+    dc.DrawText(m_owner.m_entries[index].title, text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    auto close = CloseRect(index);
+    dc.DrawText(_T("\u00d7"), close, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+    if(active)
+    {
+        rect.top = rect.bottom - HighDPISupport::ScalePixels(2, m_hWnd);
+        dc.FillSolidRect(rect, GetSysColor(COLOR_HIGHLIGHT));
+    }
+    dc.SelectObject(oldFont); dc.Detach();
+}
+
+void CDocumentTabCtrl::OnLButtonDown(UINT flags, CPoint point)
+{
+    TCHITTESTINFO hit{}; hit.pt = point;
+    const int index = HitTest(&hit);
+    if(m_owner.FrameAt(index) && CloseRect(index).PtInRect(point))
+    {
+        m_pressedClose = m_owner.FrameAt(index); SetCapture(); return;
+    }
+    CTabCtrl::OnLButtonDown(flags, point);
+}
+
+void CDocumentTabCtrl::OnLButtonUp(UINT flags, CPoint point)
+{
+    if(m_pressedClose)
+    {
+        const auto frame = m_pressedClose; m_pressedClose = nullptr;
+        if(GetCapture() == this) ReleaseCapture();
+        TCHITTESTINFO hit{}; hit.pt = point;
+        const int index = HitTest(&hit);
+        if(frame == m_owner.FrameAt(index) && CloseRect(index).PtInRect(point)) m_owner.CloseTab(index);
+        return;
+    }
+    CTabCtrl::OnLButtonUp(flags, point);
+}
+
+void CDocumentTabCtrl::OnMButtonUp(UINT, CPoint point)
+{
+    TCHITTESTINFO hit{}; hit.pt = point;
+    m_owner.CloseTab(HitTest(&hit));
+}
+
+void CDocumentTabCtrl::OnCaptureChanged(CWnd *window)
+{
+    m_pressedClose = nullptr; CTabCtrl::OnCaptureChanged(window);
+}
+
+INT_PTR CDocumentTabCtrl::OnToolHitTest(CPoint point, TOOLINFO *info) const
+{
+    TCHITTESTINFO hit{}; hit.pt = point;
+    const int index = HitTest(&hit);
+    if(index < 0 || !m_owner.FrameAt(index)) return -1;
+    info->hwnd = m_hWnd; info->uId = index + 1;
+    GetItemRect(index, &info->rect); info->lpszText = LPSTR_TEXTCALLBACK;
+    return info->uId;
+}
+
+BOOL CDocumentTabCtrl::OnToolTipText(UINT, NMHDR *header, LRESULT *)
+{
+    const auto index = static_cast<int>(header->idFrom) - 1;
+    if(index < 0 || index >= static_cast<int>(m_owner.m_entries.size())) return FALSE;
+    m_tooltipText = m_owner.m_entries[index].tooltip + _T("\r\nClick \u00d7 or middle-click to close.");
+    reinterpret_cast<TOOLTIPTEXT *>(header)->lpszText = m_tooltipText.GetBuffer();
+    ::SendMessage(header->hwndFrom, TTM_SETMAXTIPWIDTH, 0, HighDPISupport::ScalePixels(700, m_hWnd));
+    return TRUE;
+}
+
+BEGIN_MESSAGE_MAP(CDocumentTabBar, CControlBar)
+    ON_WM_SIZE()
+    ON_NOTIFY(TCN_SELCHANGE, DOCUMENT_TABS_CONTROL, &CDocumentTabBar::OnSelectionChanged)
+    ON_MESSAGE(WM_DOCUMENT_TABS_REFRESH, &CDocumentTabBar::OnRefresh)
+    ON_MESSAGE(WM_DPICHANGED_AFTERPARENT, &CDocumentTabBar::OnDPIChangedAfterParent)
+END_MESSAGE_MAP()
+
+BOOL CDocumentTabBar::Create(CWnd *parent)
+{
+    m_dwStyle = CBRS_ALIGN_TOP | CBRS_SIZE_FIXED;
+    SetBorders(0, 0, 0, 0);
+    if(!CWnd::Create(AfxRegisterWndClass(0, ::LoadCursor(nullptr, IDC_ARROW), GetSysColorBrush(COLOR_BTNFACE)),
+        _T("Song tabs"), WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, CRect(0, 0, 0, 0), parent, IDW_SYN_DOCUMENT_TABS)) return FALSE;
+    if(!m_tabs.Create(WS_CHILD | WS_VISIBLE | TCS_SINGLELINE | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED | TCS_FOCUSNEVER,
+        CRect(0, 0, 0, 0), this, DOCUMENT_TABS_CONTROL)) return FALSE;
+    m_tabs.EnableToolTips(TRUE);
+    RefreshMetrics();
+    return TRUE;
+}
+
+CSize CDocumentTabBar::CalcFixedLayout(BOOL, BOOL)
+{
+    return CSize(32767, HighDPISupport::ScalePixels(30, m_hWnd));
+}
+
+void CDocumentTabBar::RefreshMetrics()
+{
+    m_font.DeleteObject(); HighDPISupport::CreateGUIFont(m_font, m_hWnd);
+    m_tabs.SetFont(&m_font);
+    m_tabs.SetItemSize(CSize(HighDPISupport::ScalePixels(200, m_hWnd), HighDPISupport::ScalePixels(26, m_hWnd)));
+}
+
+void CDocumentTabBar::OnSize(UINT type, int width, int height)
+{
+    CControlBar::OnSize(type, width, height);
+    if(m_tabs.m_hWnd) m_tabs.SetWindowPos(nullptr, 0, 0, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+LRESULT CDocumentTabBar::OnDPIChangedAfterParent(WPARAM, LPARAM)
+{
+    const auto result = Default(); RefreshMetrics();
+    if(auto *frame = GetParentFrame()) frame->RecalcLayout();
+    return result;
+}
+
+void CDocumentTabBar::RequestRefresh()
+{
+    if(m_hWnd && !m_refreshPending)
+    {
+        m_refreshPending = true; PostMessage(WM_DOCUMENT_TABS_REFRESH);
+    }
+}
+
+LRESULT CDocumentTabBar::OnRefresh(WPARAM, LPARAM)
+{
+    m_refreshPending = false;
+    auto *main = CMainFrame::GetMainFrame();
+    if(!main || !m_tabs.m_hWnd) return 0;
+    std::vector<Entry> entries;
+    for(auto *doc : theApp.GetOpenDocuments())
+    {
+        POSITION pos = doc->GetFirstViewPosition();
+        while(pos)
+        {
+            auto *frame = DYNAMIC_DOWNCAST(CChildFrame, doc->GetNextView(pos)->GetParentFrame());
+            if(!frame || !::IsWindow(frame->m_hWnd)) continue;
+            CString title = doc->GetTitle();
+            if(doc->IsModified()) title += _T(" *");
+            entries.push_back({frame->m_hWnd, title, doc->GetPathName().IsEmpty() ? doc->GetTitle() : doc->GetPathName()});
+            break;
+        }
+    }
+    bool rebuild = entries.size() != m_entries.size();
+    for(size_t i = 0; !rebuild && i < entries.size(); i++) rebuild = entries[i].frame != m_entries[i].frame;
+    if(rebuild) { m_tabs.SetRedraw(FALSE); m_tabs.DeleteAllItems(); }
+    for(size_t i = 0; i < entries.size(); i++)
+    {
+        if(rebuild) m_tabs.InsertItem(static_cast<int>(i), entries[i].title);
+        else if(entries[i].title != m_entries[i].title)
+        {
+            TCITEM item{}; item.mask = TCIF_TEXT; item.pszText = entries[i].title.GetBuffer();
+            m_tabs.SetItem(static_cast<int>(i), &item);
+        }
+    }
+    m_entries = std::move(entries);
+    const auto *active = main->MDIGetActive();
+    int selected = -1;
+    for(size_t i = 0; i < m_entries.size(); i++) if(active && m_entries[i].frame == active->m_hWnd) selected = static_cast<int>(i);
+    if(m_tabs.GetCurSel() != selected) { m_tabs.SetCurSel(selected); m_tabs.Invalidate(FALSE); }
+    if(rebuild) { m_tabs.SetRedraw(TRUE); m_tabs.Invalidate(FALSE); }
+    return 0;
+}
+
+HWND CDocumentTabBar::FrameAt(int index) const
+{
+    return index >= 0 && index < static_cast<int>(m_entries.size()) ? m_entries[index].frame : nullptr;
+}
+
+void CDocumentTabBar::OnSelectionChanged(NMHDR *, LRESULT *result)
+{
+    *result = 0;
+    auto *frame = DYNAMIC_DOWNCAST(CChildFrame, CWnd::FromHandlePermanent(FrameAt(m_tabs.GetCurSel())));
+    if(frame) frame->MDIActivate();
+    RequestRefresh();
+}
+
+void CDocumentTabBar::CloseTab(int index)
+{
+    auto *frame = DYNAMIC_DOWNCAST(CChildFrame, CWnd::FromHandlePermanent(FrameAt(index)));
+    if(frame) frame->PostMessage(WM_CLOSE);  // Native close handles Save / Discard / Cancel.
+}
 
 OPENMPT_NAMESPACE_END
