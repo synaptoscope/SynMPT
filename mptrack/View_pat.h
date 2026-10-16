@@ -61,6 +61,7 @@ public:
 		ChannelInstrument = 0x82000000,
 		ChannelRouting = 0x83000000,
 		ChannelResize = 0x84000000,
+		FolderToggle = 0x85000000,
 	};
 
 	DragItem() = default;
@@ -211,10 +212,18 @@ protected:
 		uint8 selectedCols = 0;
 		bool hasPanAutomation = false, hasVolumeAutomation = false;
 		bool panExpanded = false, volumeExpanded = false;
+		bool folderCollapsed = false;
 		int widthDip = 0;
 	};
 
 	std::vector<ChannelState> m_chnState;
+    CHANNELINDEX m_armedComposite = CHANNELINDEX_INVALID;
+    CHANNELINDEX m_lastVisibleTrack = 0;
+    struct CompositeVoice { CHANNELINDEX track, preview; ModCommand::NOTE note; uint16 instrument; };
+    std::array<std::vector<CompositeVoice>, NOTE_MAX + 1> m_compositeVoices;
+    bool EnterCompositeNote(ModCommand::NOTE note, int volume, bool fromMidi);
+    bool StopCompositeNote(ModCommand::NOTE note, bool fromMidi, bool writeRelease = true);
+    void StopCompositeVoices();
 	std::bitset<128> m_baPlayingNote;
 	CModDoc::NoteToChannelMap m_noteChannel;  // Note -> Preview channel assignment
 	std::array<ModCommand::NOTE, (NOTE_MAX - NOTE_MIN + 12) / 12> m_octaveKeyMemory;
@@ -293,6 +302,12 @@ public:
 	bool CanGroupTrack(CHANNELINDEX channel, uint16 instrument = 0) const;
 	void ShowTrackRoutingMenu(CHANNELINDEX channel);
 	void CreateGroupBus();
+    bool IsTrackVisible(CHANNELINDEX channel) const;
+    void ToggleTrackFolder(CHANNELINDEX channel);
+    void ArrangeTrackFolders();
+    bool ConfigureCompositeInput(CHANNELINDEX channel);
+    void ToggleTrackRecord(CHANNELINDEX channel);
+    bool IsCompositeTrackArmed(CHANNELINDEX channel) const;
 	int GetTrackWidth(CHANNELINDEX channel) const;
 	int GetTrackScrollPixel(CHANNELINDEX channel) const;
 	CHANNELINDEX GetTrackAtScrollPixel(int pixel) const;
@@ -491,6 +506,9 @@ protected:
 	afx_msg void OnTrackNarrower() { ResizeTracks(-12, false); }
 	afx_msg void OnTrackInstrument() { ShowTrackInstrumentMenu(GetCurrentChannel()); }
 	afx_msg void OnTrackGroupOutput() { ShowTrackRoutingMenu(GetCurrentChannel()); }
+    afx_msg void OnTrackCompositeInput();
+    afx_msg void OnTrackFolderToggle();
+    afx_msg void OnTrackArm() { ToggleTrackRecord(GetCurrentChannel()); }
 	afx_msg void OnTogglePendingMuteFromClick();
 	afx_msg void OnPendingSoloChnFromClick();
 	afx_msg void OnPendingUnmuteAllChnFromClick();

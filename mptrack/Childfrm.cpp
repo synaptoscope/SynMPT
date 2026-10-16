@@ -535,6 +535,8 @@ std::string PatternViewState::Serialize() const
 	mpt::IO::WriteVarInt(f, defaultTrackWidth);
 	mpt::IO::WriteVarInt(f, trackWidths.size());
 	for(auto width : trackWidths) mpt::IO::WriteVarInt(f, width);
+	mpt::IO::WriteVarInt(f, collapsedFolders.size());
+	for(bool collapsed : collapsedFolders) mpt::IO::WriteVarInt(f, collapsed ? 1u : 0u);
 	return std::move(f).str();
 }
 
@@ -558,6 +560,12 @@ void PatternViewState::Deserialize(FileReader &f)
 		trackWidths.assign(count, 0);
 		for(auto &width : trackWidths) f.ReadVarInt(width);
 	}
+    count = 0;
+    if(f.ReadVarInt(count) && count <= MAX_BASECHANNELS)
+    {
+        collapsedFolders.assign(count, false);
+        for(size_t i = 0; i < count; i++) { unsigned value = 0; f.ReadVarInt(value); collapsedFolders[i] = value != 0; }
+    }
 }
 
 

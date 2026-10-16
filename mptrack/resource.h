@@ -1347,16 +1347,29 @@
 #define ID_TRACK_INSTRUMENT             44665
 #define ID_TRACK_GROUP_OUTPUT           44666
 #define ID_TRANSPORT_DOCK               44667
+#define ID_TRACK_COMPOSITE_INPUT        44668
+#define ID_TRACK_FOLDER_TOGGLE          44669
+#define ID_TRACK_ARM                    44670
 #define IDW_SYN_DOCUMENT_TABS           0xE803
+
+#define IDD_COMPOSITE_INPUT             543
+#define IDC_COMPOSITE_ENABLED           2518
+#define IDC_COMPOSITE_TRACKS            2519
+#define IDC_COMPOSITE_ROUTE             2520
+#define IDC_COMPOSITE_INSTRUMENT        2521
+#define IDC_COMPOSITE_LOW               2522
+#define IDC_COMPOSITE_HIGH              2523
+#define IDC_COMPOSITE_TRANSPOSE         2524
+#define IDC_COMPOSITE_SPREAD            2525
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_3D_CONTROLS                     1
-#define _APS_NEXT_RESOURCE_VALUE        543
-#define _APS_NEXT_COMMAND_VALUE         44668
-#define _APS_NEXT_CONTROL_VALUE         2518
+#define _APS_NEXT_RESOURCE_VALUE        544
+#define _APS_NEXT_COMMAND_VALUE         44671
+#define _APS_NEXT_CONTROL_VALUE         2526
 #define _APS_NEXT_SYMED_VALUE           901
 #endif
 #endif

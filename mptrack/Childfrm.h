@@ -45,7 +45,8 @@ struct PatternViewState
 	std::vector<uint8> automationLanes;
 	std::vector<uint16> trackWidths;
 	uint16 defaultTrackWidth = 0;
-	std::vector<bool> selectedTracks, soloTracks;
+	std::vector<bool> selectedTracks, soloTracks, collapsedFolders;
+	CHANNELINDEX armedComposite = CHANNELINDEX_INVALID;
 	CHANNELINDEX trackSelectionAnchor = CHANNELINDEX_INVALID;
 	bool initialized = false;
 

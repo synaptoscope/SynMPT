@@ -1,6 +1,7 @@
 #include "../../common/stdafx.h"
 #include "../../mptrack/PatternAutomation.h"
 #include "../../soundlib/TrackRouting.h"
+#include "../../soundlib/CompositeInput.h"
 #include "../../mptrack/TrackHeader.h"
 #include <iostream>
 #include <stdexcept>
@@ -99,7 +100,39 @@ void RunSynMPTAutomationChecks()
     check(std::none_of(toggled.begin(),toggled.end(),[](bool soloed){return soloed;}),"last Solo toggle clears the solo set");
     for(const auto [dpi,panBottom]:std::vector<std::pair<int,int>>{{96,92},{120,117},{144,138},{168,163},{192,184}})
         check(TrackHeaderLayout(dpi).ControlsBottom()==panBottom,"meter/plugin boundary must follow all five header rows at fractional DPI");
-	std::cout << "PASS: native automation storage, shared lanes, note/velocity protection, effect collisions, plugin notes, erase, format mappings, line endpoints, nested buses, solo, gain/pan/mute, cycle protection, multi-select, additive multi-solo and DPI header bounds\n";
+
+    band[4].compositeInput = true;
+    band[0].trackInstrument = 1; band[0].inputEnabled = true;
+    band[0].inputNoteMin = NOTE_MIDDLEC; band[0].inputNoteMax = NOTE_MIDDLEC + 11;
+    band[1].trackInstrument = 2; band[1].inputEnabled = true;
+    band[1].inputNoteMin = NOTE_MIDDLEC + 12; band[1].inputNoteMax = NOTE_MIDDLEC + 23; band[1].inputTranspose = -12;
+    auto routed = ResolveCompositeInput(band,4,NOTE_MIDDLEC);
+    check(routed.size()==1 && routed[0].channel==0 && routed[0].note==NOTE_MIDDLEC,"first articulation routes to its own lane");
+    routed = ResolveCompositeInput(band,4,NOTE_MIDDLEC+12);
+    check(routed.size()==1 && routed[0].channel==1 && routed[0].note==NOTE_MIDDLEC && routed[0].instrument==2,"second key bank retains the same sounding pitch");
+    check(ResolveCompositeInput(band,4,NOTE_MIN).empty(),"unmapped keys have no output");
+    band[1].inputNoteMin=NOTE_MIDDLEC;band[1].inputNoteMax=NOTE_MIDDLEC+11;band[1].inputTranspose=0;
+    routed=ResolveCompositeInput(band,4,NOTE_MIDDLEC);
+    check(routed.size()==2,"overlapping articulation ranges layer their native lanes");
+    band[1].inputTranspose=119;
+    check(ResolveCompositeInput(band,4,NOTE_MIDDLEC).size()==1,"out-of-range output pitch is not wrapped");
+    band[0].inputEnabled=false;
+    check(ResolveCompositeInput(band,4,NOTE_MIDDLEC).empty(),"disabled articulation receives no notes");
+    cell={};cell.volcmd=VOLCMD_PANNING;cell.vol=16;
+    check(WriteCompositeNote(cell,{0,NOTE_MIDDLEC,1},44) && cell.note==NOTE_MIDDLEC && cell.instr==1 && cell.volcmd==VOLCMD_PANNING && cell.command==CMD_VOLUME && cell.param==44,"mapped note retains pan automation and uses a free velocity slot");
+    const auto occupied=cell;
+    check(!WriteCompositeNote(cell,{0,NOTE_MIDDLEC+2,2},50) && cell==occupied,"composite entry keeps an occupied note intact");
+    cell={};cell.note=NOTE_PCS;cell.instr=2;const auto pc=cell;
+    check(!WriteCompositeNote(cell,{0,NOTE_MIDDLEC,1},64) && cell==pc,"composite entry protects plugin parameter notes");
+    const auto folderOrder=TrackFolderOrder(band);
+    check(folderOrder==std::vector<CHANNELINDEX>({2,4,3,0,1,5}),"folder preorder keeps nested non-adjacent members together");
+    std::vector<bool> collapsed(6,false);collapsed[3]=true;
+    check(TrackHiddenByFolder(band,0,collapsed) && TrackHiddenByFolder(band,1,collapsed) && !TrackHiddenByFolder(band,3,collapsed) && !TrackHiddenByFolder(band,2,collapsed),"collapse hides descendants but keeps the folder and unrelated tracks");
+    collapsed[4]=true;
+    check(TrackHiddenByFolder(band,3,collapsed),"outer folder collapse includes nested folders");
+    band[4].parentBus=3;
+    check(TrackFolderOrder(band).size()==band.size(),"malformed cyclic hierarchy still has each track exactly once");
+	std::cout << "PASS: native automation storage, shared lanes, note/velocity protection, effect collisions, plugin notes, erase, format mappings, line endpoints, nested buses, solo, gain/pan/mute, cycle protection, multi-select, additive multi-solo, DPI header bounds, composite articulations/layers/pitch/protection and folder hierarchy\n";
 }
 OPENMPT_NAMESPACE_END
 #ifdef SYNMPT_AUTOMATION_CHECK_MAIN

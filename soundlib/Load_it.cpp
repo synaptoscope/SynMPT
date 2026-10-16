@@ -2458,16 +2458,20 @@ void CSoundFile::SaveExtendedSongProperties(std::ostream &f) const
 
 	// SynMPT track routing and instrument overrides are MPTM extensions.
 	if(GetType() == MOD_TYPE_MPT && std::any_of(ChnSettings.begin(), ChnSettings.end(), [](const auto &track) {
-		return track.isBus || track.parentBus != CHANNELINDEX_INVALID || track.trackInstrument != 0;
+		return track.isBus || track.parentBus != CHANNELINDEX_INVALID || track.trackInstrument != 0 || track.inputEnabled;
 	}))
 	{
-		WriteModularHeader(f, MagicLE("SNTK"), 1 + GetNumChannels() * 5);
-		mpt::IO::WriteIntLE<uint8>(f, 1);
+		WriteModularHeader(f, MagicLE("SNTK"), 1 + GetNumChannels() * 8);
+		mpt::IO::WriteIntLE<uint8>(f, 2);
 		for(const auto &track : ChnSettings)
 		{
 			mpt::IO::WriteIntLE<uint16>(f, track.trackInstrument);
 			mpt::IO::WriteIntLE<uint16>(f, track.parentBus);
-			mpt::IO::WriteIntLE<uint8>(f, (track.isBus ? 1 : 0) | (track.isBus && track.dwFlags[CHN_MUTE] ? 2 : 0));
+			mpt::IO::WriteIntLE<uint8>(f, (track.isBus ? 1 : 0) | (track.isBus && track.dwFlags[CHN_MUTE] ? 2 : 0)
+                | (track.compositeInput ? 4 : 0) | (track.inputEnabled ? 8 : 0));
+            mpt::IO::WriteIntLE<uint8>(f, track.inputNoteMin);
+            mpt::IO::WriteIntLE<uint8>(f, track.inputNoteMax);
+            mpt::IO::WriteIntLE<int8>(f, track.inputTranspose);
 		}
 	}
 
@@ -2628,21 +2632,32 @@ bool CSoundFile::LoadExtendedSongProperties(FileReader &file, bool ignoreChannel
 				break;
 #endif
 			case MagicLE("SNTK"):
-				if(GetType() == MOD_TYPE_MPT && chunk.ReadUint8() == 1)
+            {
+                const auto version = chunk.ReadUint8();
+				if(GetType() == MOD_TYPE_MPT && (version == 1 || version == 2))
 				{
-					for(CHANNELINDEX channel = 0; channel < GetNumChannels() && chunk.CanRead(5); channel++)
+					for(CHANNELINDEX channel = 0; channel < GetNumChannels() && chunk.CanRead(version == 1 ? 5 : 8); channel++)
 					{
 						auto &track = ChnSettings[channel];
 						track.trackInstrument = std::min<uint16>(chunk.ReadUint16LE(), MAX_INSTRUMENTS - 1);
 						track.parentBus = chunk.ReadUint16LE();
 						const auto flags = chunk.ReadUint8();
 						track.isBus = (flags & 1) != 0;
+                        if(version >= 2)
+                        {
+                            track.compositeInput = track.isBus && (flags & 4) != 0;
+                            track.inputEnabled = !track.isBus && (flags & 8) != 0;
+                            track.inputNoteMin = Clamp(chunk.ReadUint8(), uint8(NOTE_MIN), uint8(NOTE_MAX));
+                            track.inputNoteMax = Clamp(chunk.ReadUint8(), track.inputNoteMin, uint8(NOTE_MAX));
+                            track.inputTranspose = Clamp(chunk.ReadInt8(), int8(-119), int8(119));
+                        }
 						if(track.isBus) track.dwFlags.set(CHN_MUTE, (flags & 2) != 0);
 					}
 					for(CHANNELINDEX channel = 0; channel < GetNumChannels(); channel++)
 						if(!VisitTrackBuses(ChnSettings, channel, [](CHANNELINDEX) {})) ChnSettings[channel].parentBus = CHANNELINDEX_INVALID;
 				}
 				break;
+            }
 			case MagicLE("AUTH"):
 				{
 					std::string artist;

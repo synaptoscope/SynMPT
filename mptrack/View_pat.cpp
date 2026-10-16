@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "View_pat.h"
+#include "../soundlib/CompositeInput.h"
 #include "Childfrm.h"
 #include "Ctrl_pat.h"
 #include "EffectVis.h"
@@ -96,6 +97,9 @@ BEGIN_MESSAGE_MAP(CViewPattern, CModScrollView)
 	ON_COMMAND(ID_TRACK_NARROWER_SELECTED, &CViewPattern::OnTrackNarrower)
 	ON_COMMAND(ID_TRACK_INSTRUMENT, &CViewPattern::OnTrackInstrument)
 	ON_COMMAND(ID_TRACK_GROUP_OUTPUT, &CViewPattern::OnTrackGroupOutput)
+    ON_COMMAND(ID_TRACK_COMPOSITE_INPUT, &CViewPattern::OnTrackCompositeInput)
+    ON_COMMAND(ID_TRACK_FOLDER_TOGGLE, &CViewPattern::OnTrackFolderToggle)
+    ON_COMMAND(ID_TRACK_ARM, &CViewPattern::OnTrackArm)
 	ON_COMMAND(ID_PATTERN_TRANSITIONMUTE, &CViewPattern::OnTogglePendingMuteFromClick)
 	ON_COMMAND(ID_PATTERN_TRANSITIONSOLO, &CViewPattern::OnPendingSoloChnFromClick)
 	ON_COMMAND(ID_PATTERN_TRANSITION_UNMUTEALL, &CViewPattern::OnPendingUnmuteAllChnFromClick)
@@ -403,10 +407,24 @@ bool CViewPattern::SetCurrentColumn(CHANNELINDEX channel, PatternCursor::Columns
 		return false;
 	}
 
+    if(!IsTrackVisible(channel))
+    {
+        const bool forward = channel >= m_lastVisibleTrack;
+        int candidate = channel;
+        while(candidate >= 0 && candidate < pSndFile->GetNumChannels() && !IsTrackVisible(static_cast<CHANNELINDEX>(candidate))) candidate += forward ? 1 : -1;
+        if(candidate >= 0 && candidate < pSndFile->GetNumChannels()) channel = static_cast<CHANNELINDEX>(candidate);
+        else
+        {
+            candidate = channel;
+            while(candidate > 0 && !IsTrackVisible(static_cast<CHANNELINDEX>(candidate))) candidate--;
+            channel = static_cast<CHANNELINDEX>(candidate);
+        }
+    }
 	LimitMax(column, LastVisibleColumn());
 	while(!m_visibleColumns[column])
 		column = static_cast<PatternCursor::Columns>(column + 1);
 	m_Cursor.SetColumn(channel, column);
+	m_lastVisibleTrack = channel;
 
 	PatternCursor selStart(m_Cursor);
 
@@ -533,6 +551,9 @@ CRect CViewPattern::GetTrackControlRect(CHANNELINDEX channel, DragItem::DragType
 	CRect rect(left, 0, left + width, nameHeight);
 	switch(type)
 	{
+    case DragItem::FolderToggle:
+        if(!GetSoundFile()->ChnSettings[channel].isBus) return CRect(0, 0, 0, 0);
+        rect.right = left + MulDiv(16, m_dpi, 96); break;
 	case DragItem::ChannelMute: rect.top = nameHeight; rect.bottom += rowHeight; rect.right = left + buttonWidth; break;
 	case DragItem::ChannelSolo: rect.top = nameHeight; rect.bottom += rowHeight; rect.left += buttonWidth; rect.right = left + buttonWidth * 2; break;
 	case DragItem::ChannelRecord: rect.top = nameHeight; rect.bottom += rowHeight; rect.left += buttonWidth * 2; rect.right = left + buttonWidth * 3; break;
@@ -641,6 +662,7 @@ DragItem CViewPattern::GetDragItem(CPoint point, RECT &outRect) const
 	if(!sndFile) return {};
 	for(CHANNELINDEX channel = static_cast<CHANNELINDEX>(GetXScrollPos()); channel < sndFile->GetNumChannels(); channel++)
 	{
+		if(!IsTrackVisible(channel)) continue;
 		for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
 		{
 			auto rect = GetAutomationRect(channel, lane);
@@ -658,7 +680,7 @@ DragItem CViewPattern::GetDragItem(CPoint point, RECT &outRect) const
 			CRect rect(left, m_szHeader.cy - m_szPluginHeader.cy, left + GetNoteTrackWidth(channel), m_szHeader.cy);
 			if(rect.PtInRect(point)) { outRect = rect; return {DragItem::PluginName, channel}; }
 		}
-		for(auto type : {DragItem::ChannelResize, DragItem::ChannelMute, DragItem::ChannelSolo, DragItem::ChannelRecord, DragItem::ChannelInstrument, DragItem::ChannelRouting, DragItem::PanLaneToggle, DragItem::VolumeLaneToggle, DragItem::ChannelVolume, DragItem::ChannelPan, DragItem::ChannelHeader})
+		for(auto type : {DragItem::ChannelResize, DragItem::FolderToggle, DragItem::ChannelMute, DragItem::ChannelSolo, DragItem::ChannelRecord, DragItem::ChannelInstrument, DragItem::ChannelRouting, DragItem::PanLaneToggle, DragItem::VolumeLaneToggle, DragItem::ChannelVolume, DragItem::ChannelPan, DragItem::ChannelHeader})
 		{
 			auto rect = GetTrackControlRect(channel, type);
 			if(rect.PtInRect(point)) { outRect = rect; return {type, channel}; }
@@ -864,6 +886,7 @@ BOOL CViewPattern::PreTranslateMessage(MSG *pMsg)
 // cppcheck-suppress duplInheritedMember
 void CViewPattern::OnDestroy()
 {
+	StopCompositeVoices();
 	// Fix: save pattern scrollbar position when switching to other tab
 	// When we switching to other tab the CViewPattern object is deleted
 	CModDoc *pModDoc = GetDocument();
@@ -908,6 +931,7 @@ void CViewPattern::OnKillFocus(CWnd *pNewWnd)
 {
 	CScrollView::OnKillFocus(pNewWnd);
 
+	StopCompositeVoices();
 	m_Status.reset(psCtrlDragSelect | psFocussed);
 	InvalidateRow();
 }
@@ -1258,6 +1282,10 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 			m_Status.reset(psDragging); return;
 		}
 	}
+    if(control.Type() == DragItem::FolderToggle)
+    {
+        m_nDragItem = m_nDropItem = {}; ToggleTrackFolder(static_cast<CHANNELINDEX>(control.Value())); return;
+    }
 	if(control.Type() == DragItem::ChannelResize)
 	{
 		m_resizingTrack = static_cast<CHANNELINDEX>(control.Value()); m_resizeStartX = point.x;
@@ -1525,8 +1553,7 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 		break;
 
 	case DragItem::ChannelRecord:
-		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels() && !GetSoundFile()->ChnSettings[sourceChn].isBus)
-		{ modDoc->ToggleChannelRecordGroup(sourceChn, RecordGroup::Group1); InvalidateChannelsHeaders(sourceChn); }
+		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels()) ToggleTrackRecord(sourceChn);
 		break;
 	case DragItem::ChannelSolo:
 		if(sourceChn == targetChn && sourceChn < modDoc->GetNumChannels())
@@ -1572,9 +1599,13 @@ void CViewPattern::DragChannel(CHANNELINDEX source, CHANNELINDEX target, CHANNEL
 			modified = true;
 		}
 	}
+	StopCompositeVoices();
 	const auto previousStates = m_chnState;
+	const auto armedBeforeMove = m_armedComposite;
 	if(modified && modDoc->ReArrangeChannels(channels) != CHANNELINDEX_INVALID)
 	{
+        m_armedComposite = CHANNELINDEX_INVALID;
+        for(CHANNELINDEX i = 0; i < channels.size(); i++) if(channels[i] == armedBeforeMove) m_armedComposite = i;
 		m_trackSelection.Remap(channels);
 		TrackHeaderSelection soloState;
 		soloState.Restore(m_trackSoloTargets, TrackHeaderSelection::Invalid); soloState.Remap(channels);
@@ -1586,9 +1617,10 @@ void CViewPattern::DragChannel(CHANNELINDEX source, CHANNELINDEX target, CHANNEL
 			m_chnState[channel].panExpanded = previousStates[channels[channel]].panExpanded;
 			m_chnState[channel].volumeExpanded = previousStates[channels[channel]].volumeExpanded;
 			m_chnState[channel].widthDip = previousStates[channels[channel]].widthDip;
+			m_chnState[channel].folderCollapsed = previousStates[channels[channel]].folderCollapsed;
 		}
 		m_automationPresenceDirty = true;
-		modDoc->UpdateAllViews(this, GeneralHint().Channels().ModType(), this);
+
 		if(duplicate)
 		{
 			// Number of channels changed: Update channel headers and other information.
@@ -1610,6 +1642,9 @@ void CViewPattern::DragChannel(CHANNELINDEX source, CHANNELINDEX target, CHANNEL
 			}
 		}
 
+        ArrangeTrackFolders();
+        modDoc->UpdateAllViews(this, GeneralHint().Channels().ModType(), this);
+        UpdateScrollSize();
 		InvalidatePattern(true, false);
 		SetModified(false);
 	}
@@ -2147,7 +2182,7 @@ void CViewPattern::SelectTrackHeader(CHANNELINDEX channel, UINT flags)
     // Keep keyboard Mute/Solo on the remaining selection after Ctrl-deselect.
     if(!m_trackSelection.Contains(channel) && m_trackSelection.Count())
         channel = static_cast<CHANNELINDEX>(std::find(m_trackSelection.Mask().begin(), m_trackSelection.Mask().end(), true) - m_trackSelection.Mask().begin());
-    m_Cursor.SetColumn(channel, m_Cursor.GetColumnType()); SetSelToCursor();
+    m_Cursor.SetColumn(channel, m_Cursor.GetColumnType()); m_lastVisibleTrack = channel; SetSelToCursor();
     InvalidateChannelsHeaders(); UpdateIndicator();
 }
 
@@ -4570,6 +4605,8 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 			m_chnState.resize(GetDocument()->GetNumChannels());
 			m_trackSelection.Restore(pState->selectedTracks, pState->trackSelectionAnchor);
 			m_trackSoloTargets = pState->soloTracks;
+            m_armedComposite = pState->armedComposite;
+            for(size_t i = 0; i < std::min(m_chnState.size(), pState->collapsedFolders.size()); i++) m_chnState[i].folderCollapsed = pState->collapsedFolders[i];
 			for(size_t channel = 0; channel < std::min(m_chnState.size(), pState->automationLanes.size()); channel++)
 			{
 				m_chnState[channel].panExpanded = (pState->automationLanes[channel] & 1) != 0;
@@ -4603,6 +4640,9 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 			pState->visibleColumns = m_visibleColumns;
 			pState->selectedTracks = m_trackSelection.Mask();
 			pState->soloTracks = m_trackSoloTargets;
+            pState->armedComposite = m_armedComposite;
+            pState->collapsedFolders.resize(m_chnState.size());
+            for(size_t i = 0; i < m_chnState.size(); i++) pState->collapsedFolders[i] = m_chnState[i].folderCollapsed;
 			pState->trackSelectionAnchor = static_cast<CHANNELINDEX>(m_trackSelection.Anchor());
 			pState->defaultTrackWidth = static_cast<uint16>(m_defaultTrackWidth);
 			pState->trackWidths.resize(m_chnState.size());
@@ -5608,6 +5648,7 @@ void CViewPattern::TempStopNote(ModCommand::NOTE note, const bool fromMidi, bool
 	{
 		return;
 	}
+	if(StopCompositeNote(note, fromMidi)) return;
 	const CModSpecifications &specs = sndFile.GetModSpecifications();
 	Limit(note, specs.noteMin, specs.noteMax);
 
@@ -5881,6 +5922,130 @@ void CViewPattern::TempEnterIns(int val)
 }
 
 
+
+bool CViewPattern::EnterCompositeNote(ModCommand::NOTE note, int volume, bool fromMidi)
+{
+    auto *doc = GetDocument(); auto &file = *GetSoundFile(); const auto current = GetCurrentChannel();
+    const bool armed = m_armedComposite < file.GetNumChannels() && file.ChnSettings[m_armedComposite].isBus
+        && file.ChnSettings[m_armedComposite].compositeInput;
+    const bool inFolder = armed && (current == m_armedComposite || TrackBelongsToBus(file.ChnSettings, current, m_armedComposite));
+    if(!inFolder)
+    {
+        if(current < file.GetNumChannels() && file.ChnSettings[current].isBus)
+        { CMainFrame::GetMainFrame()->SetInfoText(_T("Arm the folder's R button to use its composite instrument.")); return true; }
+        return false;
+    }
+    if(note == NOTE_NONE) return true;
+    if(ModCommand::IsPcNote(note)) return false;
+    const bool special = !ModCommand::IsNote(note);
+    auto routes = ResolveCompositeInput(file.ChnSettings, m_armedComposite, note);
+    if(special)
+    {
+        StopCompositeVoices();
+        if(!file.GetModSpecifications().HasNote(note)) return true;
+        for(CHANNELINDEX track = 0; track < file.GetNumChannels(); track++)
+            if(!file.ChnSettings[track].isBus && file.ChnSettings[track].inputEnabled && TrackBelongsToBus(file.ChnSettings, track, m_armedComposite))
+                routes.push_back({track, note, 0});
+    }
+    if(routes.empty())
+    { CMainFrame::GetMainFrame()->SetInfoText(_T("No composite lane accepts this key. Open the folder's Composite input settings.")); return true; }
+    if(!special) StopCompositeNote(note, false, false);
+    const FlagSet<PatternSetup> settings = TrackerSettings::Instance().patternSetup;
+    const bool live = IsLiveRecord(), record = IsEditingEnabled();
+    const bool usePlayback = live && settings[PatternSetup::AutoDelayCommands] && !file.m_PlayState.m_flags[SONG_STEP];
+    auto position = GetEditPos(file, usePlayback);
+    const bool quantize = (live || (fromMidi && (TrackerSettings::Instance().midiSetup & MidiSetup::PlayPatternOnMidiNote))) && TrackerSettings::Instance().recordQuantizeRows != 0;
+    if(quantize) QuantizeRow(position.pattern, position.row);
+    if(!file.Patterns.IsValidPat(position.pattern) || !file.Patterns[position.pattern].IsValidRow(position.row)) return true;
+    bool changed = false, blocked = false;
+    std::vector<CompositeNote> accepted;
+    {
+        CriticalSection cs;
+        auto &pattern = file.Patterns[position.pattern];
+        for(const auto &event : routes)
+        {
+            auto &cell = *pattern.GetpModCommand(position.row, event.channel); auto next = cell;
+            if(record)
+            {
+                if(!WriteCompositeNote(next, event, special ? -1 : volume)) { blocked = true; continue; }
+                if(usePlayback && m_nPlayTick && !quantize && next.command == CMD_NONE)
+                { next.command = CMD_S3MCMDEX; next.param = static_cast<ModCommand::PARAM>(0xD0 | std::min<uint32>(15, m_nPlayTick)); }
+                if(!changed) doc->GetPatternUndo().PrepareUndo(position.pattern, 0, position.row, file.GetNumChannels(), 1, "Composite Note Entry");
+                cell = next; changed = true;
+            }
+            accepted.push_back(event);
+            m_chnState.resize(file.GetNumChannels()); m_chnState[event.channel].previousNote = event.note;
+        }
+    }
+    if(!special && (settings[PatternSetup::PlayNewNotesWhileRecording | PatternSetup::PlayRowOnNoteEntry] || !record))
+    {
+        for(const auto &event : accepted)
+        {
+            auto params = PlayNoteParam(event.note).Instrument(event.instrument).Volume(volume < 0 ? -1 : 4 * volume).Channel(event.channel);
+            const auto preview = doc->PlayNote(params);
+            if(preview < MAX_CHANNELS)
+            {
+                CriticalSection cs; auto &voice = file.m_PlayState.Chn[preview];
+                voice.nGlobalVol = file.m_PlayState.Chn[event.channel].nGlobalVol;
+                voice.nPan = file.m_PlayState.Chn[event.channel].nPan;
+                voice.dwFlags.set(CHN_MUTE, doc->IsChannelMuted(event.channel));
+            }
+            m_compositeVoices[note].push_back({event.channel, preview, event.note, event.instrument});
+        }
+    } else if(!special)
+        for(const auto &event : accepted) m_compositeVoices[note].push_back({event.channel, CHANNELINDEX_INVALID, event.note, event.instrument});
+    if(changed)
+    {
+        SetModified(false); InvalidatePattern(true, true); UpdateIndicator();
+        if(!live && m_nSpacing > 0)
+            SetCurrentRow(position.row + m_nSpacing, settings[PatternSetup::ContinuousScrolling] ? WrapMode::WrapAround : WrapMode::LimitAtPatternEnd);
+        SetSelToCursor();
+    }
+    CMainFrame::GetMainFrame()->SetInfoText(blocked ? _T("Composite input: occupied child notes were kept. Use another row or edit the child lane directly.")
+        : _T("Composite input routed to its instrument lanes."));
+    return true;
+}
+
+bool CViewPattern::StopCompositeNote(ModCommand::NOTE note, bool fromMidi, bool writeRelease)
+{
+    if(!ModCommand::IsNote(note) || m_compositeVoices[note].empty()) return false;
+    auto voices = std::move(m_compositeVoices[note]); m_compositeVoices[note].clear();
+    auto *doc = GetDocument(); if(!doc) return true;
+    auto &file = doc->GetSoundFile();
+    const FlagSet<PatternSetup> settings = TrackerSettings::Instance().patternSetup;
+    const bool live = IsLiveRecord();
+    const bool record = writeRelease && IsEditingEnabled() && m_Cursor.GetColumnType() <= PatternCursor::instrColumn
+        && (fromMidi || settings[PatternSetup::RecordNoteOff]);
+    auto position = GetEditPos(file, live && settings[PatternSetup::AutoDelayCommands]);
+    if(record && TrackerSettings::Instance().recordQuantizeRows != 0 && live) QuantizeRow(position.pattern, position.row);
+    bool changed = false;
+    CriticalSection cs;
+    for(const auto &voice : voices)
+    {
+        if(voice.preview < MAX_CHANNELS)
+        {
+            const auto &preview = file.m_PlayState.Chn[voice.preview];
+            if(preview.isPreviewNote && preview.nMasterChn == voice.track + 1u && preview.nNewNote == voice.note)
+                doc->NoteOff(voice.note, settings[PatternSetup::NoteFadeOnKeyUp] || file.GetNumInstruments() == 0, voice.instrument, voice.preview);
+        }
+        if(!record || voice.track >= file.GetNumChannels() || !file.Patterns.IsValidPat(position.pattern)
+            || !file.Patterns[position.pattern].IsValidRow(position.row) || voice.track >= m_chnState.size()
+            || m_chnState[voice.track].previousNote != voice.note) continue;
+        auto &cell = *file.Patterns[position.pattern].GetpModCommand(position.row, voice.track);
+        if(cell.note != NOTE_NONE || cell.instr || cell.volcmd != VOLCMD_NONE) continue;
+        if(!changed) doc->GetPatternUndo().PrepareUndo(position.pattern, 0, position.row, file.GetNumChannels(), 1, "Composite Note Release");
+        cell.note = file.GetNumInstruments() ? NOTE_KEYOFF : NOTE_NOTECUT; changed = true;
+    }
+    cs.Leave();
+    if(changed) { SetModified(false); InvalidatePattern(true, true); }
+    return true;
+}
+
+void CViewPattern::StopCompositeVoices()
+{
+    for(int note = NOTE_MIN; note <= NOTE_MAX; note++) StopCompositeNote(static_cast<ModCommand::NOTE>(note), false, false);
+}
+
 // Enter a note in the pattern
 void CViewPattern::TempEnterNote(ModCommand::NOTE note, int vol, bool fromMidi)
 {
@@ -5896,6 +6061,7 @@ void CViewPattern::TempEnterNote(ModCommand::NOTE note, int vol, bool fromMidi)
 		return;
 	}
 
+	if(EnterCompositeNote(note, vol, fromMidi)) return;
 	if(note < NOTE_MIN_SPECIAL)
 	{
 		Limit(note, sndFile.GetModSpecifications().noteMin, sndFile.GetModSpecifications().noteMax);
@@ -7985,11 +8151,13 @@ INT_PTR CViewPattern::OnToolHitTest(CPoint point, TOOLINFO *pTI) const
 	case DragItem::ChannelMute:
 		text = _T("Mute / unmute the selected tracks. Clicking M on an unselected track affects only that track.");
 		break;
+    case DragItem::FolderToggle:
+        text = _T("Expand or collapse this folder's child tracks. Playback is unchanged."); break;
 	case DragItem::ChannelRecord:
-		text = _T("Arm this track for step or MIDI note entry");
+		text = _T("Arm this track, or the folder's composite input, for step or MIDI note entry");
 		break;
 	case DragItem::ChannelInstrument:
-		text = _T("Choose the track instrument. Pattern mode keeps the instruments written in each row.");
+		text = _T("Choose the track instrument, or edit a folder's composite key ranges and layers.");
 		break;
 	case DragItem::ChannelRouting:
 		text = _T("Choose a group output, or create a group from the selected tracks");
@@ -8092,7 +8260,7 @@ HRESULT CViewPattern::get_accName(VARIANT varChild, BSTR *pszName)
 
 int CViewPattern::GetAutomationWidth(CHANNELINDEX channel, AutomationLane lane) const
 {
-	if(channel >= m_chnState.size()) return 0;
+	if(channel >= m_chnState.size() || !IsTrackVisible(channel)) return 0;
 	const auto &state = m_chnState[channel];
 	const bool open = lane == AutomationLane::Pan ? state.hasPanAutomation && state.panExpanded : state.hasVolumeAutomation && state.volumeExpanded;
 	return open ? MulDiv(64, m_dpi, 96) : 0;
@@ -8125,7 +8293,12 @@ void CViewPattern::ResizeTracks(int delta, bool allTracks)
 CString CViewPattern::GetTrackInstrumentLabel(CHANNELINDEX channel) const
 {
     const auto &file = *GetSoundFile(); const auto &track = file.ChnSettings[channel];
-    if(track.isBus) return _T("Group bus");
+    if(track.isBus)
+    {
+        unsigned members = 0;
+        for(CHANNELINDEX child = 0; child < file.GetNumChannels(); child++) if(!file.ChnSettings[child].isBus && TrackBelongsToBus(file.ChnSettings, child, channel)) members++;
+        return MPT_CFORMAT("{}: {} lanes...")(track.compositeInput ? _T("Composite") : _T("Folder"), members);
+    }
     uint16 instrument = track.trackInstrument;
     const bool fromPattern = !instrument;
     if(!instrument && file.Patterns.IsValidPat(m_nPattern))
@@ -8166,7 +8339,8 @@ CString CViewPattern::GetTrackInstrumentLabel(CHANNELINDEX channel) const
 void CViewPattern::ShowTrackInstrumentMenu(CHANNELINDEX channel)
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile();
-    if(channel >= file.GetNumChannels() || file.ChnSettings[channel].isBus) return;
+    if(channel >= file.GetNumChannels()) return;
+    if(file.ChnSettings[channel].isBus) { ConfigureCompositeInput(channel); return; }
     if(file.GetType() != MOD_TYPE_MPT)
     { Reporting::Information(_T("Track instrument assignments are saved in MPTM songs. Change the song format to MPTM first.")); return; }
     CMenu menu; menu.CreatePopupMenu();
@@ -8241,9 +8415,11 @@ void CViewPattern::ShowTrackRoutingMenu(CHANNELINDEX channel)
     if(chosen == 1) { CreateGroupBus(); return; }
 	if(chosen != 2 && !CanGroupTrack(channel))
 	{ Reporting::Information(_T("Group buses currently support sample instruments. This track uses an external plugin, effect, MIDI output or FM instrument; keep its existing output routing.")); return; }
-	doc->GetPatternUndo().PrepareChannelUndo(channel, 1, "Track Routing");
+	StopCompositeVoices();
+	doc->PrepareUndoForAllPatterns(true, "Track Routing");
     { CriticalSection cs; file.ChnSettings[channel].parentBus = chosen == 2 ? CHANNELINDEX_INVALID : static_cast<CHANNELINDEX>(chosen - 1000); }
-    doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels()); InvalidatePattern(true, true);
+    ArrangeTrackFolders();
+    doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels()); UpdateScrollSize(); InvalidatePattern(true, true);
 }
 
 void CViewPattern::CreateGroupBus()
@@ -8270,6 +8446,7 @@ void CViewPattern::CreateGroupBus()
     if(name.DoModal() != IDOK) return;
     std::vector<CHANNELINDEX> order(count + 1);
     for(CHANNELINDEX channel = 0; channel <= count; channel++) order[channel] = channel < first ? channel : channel == first ? CHANNELINDEX_INVALID : channel - 1;
+    StopCompositeVoices();
     if(doc->ReArrangeChannels(order) != count + 1) return;
     {
         CriticalSection cs;
@@ -8281,18 +8458,128 @@ void CViewPattern::CreateGroupBus()
         doc->InitChannel(first);
     }
     m_chnState.insert(m_chnState.begin() + first, ChannelState{});
+    if(m_armedComposite != CHANNELINDEX_INVALID && m_armedComposite >= first) m_armedComposite++;
     m_trackSelection.Click(first, count + 1, false, false);
     TrackHeaderSelection soloState; soloState.Restore(m_trackSoloTargets, TrackHeaderSelection::Invalid); soloState.Remap(order);
     m_trackSoloTargets = soloState.Mask();
     if(hadSolo) SoloTrackMask(m_trackSoloTargets, false);
     m_automationPresenceDirty = true;
+    m_Cursor.SetColumn(first, m_Cursor.GetColumnType()); ArrangeTrackFolders();
     doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels().ModType());
-    SetCurrentColumn(first, m_Cursor.GetColumnType()); SetSelToCursor(); UpdateScrollSize(); InvalidatePattern(true, true);
+    SetCurrentColumn(m_Cursor); SetSelToCursor(); UpdateScrollSize(); InvalidatePattern(true, true);
+}
+
+
+void CViewPattern::OnTrackCompositeInput()
+{
+    auto channel = GetCurrentChannel(); const auto &file = *GetSoundFile();
+    if(!file.ChnSettings[channel].isBus) channel = file.ChnSettings[channel].parentBus;
+    if(channel >= file.GetNumChannels()) { Reporting::Information(_T("Select a folder or one of its member tracks first.")); return; }
+    ConfigureCompositeInput(channel);
+}
+
+void CViewPattern::OnTrackFolderToggle()
+{
+    auto channel = GetCurrentChannel(); const auto &file = *GetSoundFile();
+    if(!file.ChnSettings[channel].isBus) channel = file.ChnSettings[channel].parentBus;
+    if(channel < file.GetNumChannels()) ToggleTrackFolder(channel);
+}
+
+bool CViewPattern::IsTrackVisible(CHANNELINDEX channel) const
+{
+    const auto *file = GetSoundFile(); if(!file || channel >= file->GetNumChannels()) return true;
+    bool hidden = false;
+    VisitTrackBuses(file->ChnSettings, channel, [&](CHANNELINDEX bus) { if(bus < m_chnState.size() && m_chnState[bus].folderCollapsed) hidden = true; });
+    return !hidden;
+}
+
+void CViewPattern::ToggleTrackFolder(CHANNELINDEX channel)
+{
+    auto &file = *GetSoundFile(); if(channel >= file.GetNumChannels() || !file.ChnSettings[channel].isBus) return;
+    CancelAutomationLine(); m_chnState.resize(file.GetNumChannels());
+    m_chnState[channel].folderCollapsed = !m_chnState[channel].folderCollapsed;
+    if(!IsTrackVisible(GetCurrentChannel())) m_Cursor.SetColumn(channel, PatternCursor::noteColumn);
+    m_trackSelection.Click(channel, file.GetNumChannels(), false, false); SetSelToCursor();
+    UpdateScrollSize(); UpdateScrollPos(); SetCurrentColumn(m_Cursor); InvalidatePattern(true, true);
+}
+
+void CViewPattern::ArrangeTrackFolders()
+{
+    auto &file = *GetSoundFile(); const auto order = TrackFolderOrder(file.ChnSettings);
+    bool changed = false; for(size_t i = 0; i < order.size(); i++) if(order[i] != i) changed = true;
+    if(!changed) return;
+    StopCompositeVoices();
+    const auto previous = m_chnState; const auto cursor = GetCurrentChannel(), armed = m_armedComposite;
+    if(GetDocument()->ReArrangeChannels(order, false) != order.size()) return;
+    m_chnState.assign(order.size(), ChannelState{}); m_armedComposite = CHANNELINDEX_INVALID;
+    for(CHANNELINDEX i = 0; i < order.size(); i++)
+    {
+        if(order[i] < previous.size()) m_chnState[i] = previous[order[i]];
+        if(order[i] == cursor) m_Cursor.SetColumn(i, m_Cursor.GetColumnType());
+        if(order[i] == armed) m_armedComposite = i;
+    }
+    m_trackSelection.Remap(order);
+    TrackHeaderSelection solo; solo.Restore(m_trackSoloTargets, TrackHeaderSelection::Invalid); solo.Remap(order); m_trackSoloTargets = solo.Mask();
+    m_automationPresenceDirty = true;
+}
+
+bool CViewPattern::ConfigureCompositeInput(CHANNELINDEX channel)
+{
+    auto *doc = GetDocument(); auto &file = *GetSoundFile();
+    if(channel >= file.GetNumChannels() || !file.ChnSettings[channel].isBus) return false;
+    CCompositeInputDlg dialog(*doc, channel, this);
+    if(!file.ChnSettings[channel].compositeInput) dialog.enabled = true;
+    StopCompositeVoices();
+    if(dialog.DoModal() != IDOK) return false;
+    for(CHANNELINDEX i = 0; i < file.GetNumChannels(); i++)
+        if(dialog.tracks[i].inputEnabled && TrackBelongsToBus(file.ChnSettings, i, channel) && !CanGroupTrack(i, dialog.tracks[i].trackInstrument))
+        { Reporting::Information(_T("Composite folders currently support sampled instruments. One enabled lane uses an external output.")); return false; }
+    doc->GetPatternUndo().PrepareChannelUndo(0, file.GetNumChannels(), "Composite Instrument");
+    {
+        CriticalSection cs; file.ChnSettings[channel].compositeInput = dialog.enabled;
+        for(CHANNELINDEX i = 0; i < file.GetNumChannels(); i++)
+            if(!file.ChnSettings[i].isBus && TrackBelongsToBus(file.ChnSettings, i, channel))
+            {
+                auto &track = file.ChnSettings[i]; const auto &source = dialog.tracks[i];
+                track.inputEnabled = source.inputEnabled; track.inputNoteMin = source.inputNoteMin;
+                track.inputNoteMax = source.inputNoteMax; track.inputTranspose = source.inputTranspose;
+                track.trackInstrument = source.trackInstrument;
+            }
+    }
+    if(!dialog.enabled && m_armedComposite == channel) m_armedComposite = CHANNELINDEX_INVALID;
+    doc->SetModified(); doc->UpdateAllViews(nullptr, GeneralHint().Channels()); InvalidatePattern(true, true);
+    return dialog.enabled;
+}
+
+bool CViewPattern::IsCompositeTrackArmed(CHANNELINDEX channel) const
+{
+    const auto &file = *GetSoundFile();
+    if(m_armedComposite >= file.GetNumChannels() || !file.ChnSettings[m_armedComposite].compositeInput) return false;
+    return channel == m_armedComposite || (file.ChnSettings[channel].inputEnabled && TrackBelongsToBus(file.ChnSettings, channel, m_armedComposite));
+}
+
+void CViewPattern::ToggleTrackRecord(CHANNELINDEX channel)
+{
+    auto *doc = GetDocument(); auto &file = *GetSoundFile();
+    if(file.ChnSettings[channel].isBus)
+    {
+        StopCompositeVoices();
+        if(m_armedComposite == channel) m_armedComposite = CHANNELINDEX_INVALID;
+        else if(file.ChnSettings[channel].compositeInput || ConfigureCompositeInput(channel))
+        {
+            m_armedComposite = channel; SelectTrackHeader(channel, 0);
+        }
+    } else
+    {
+        if(IsCompositeTrackArmed(channel)) { StopCompositeVoices(); m_armedComposite = CHANNELINDEX_INVALID; }
+        doc->ToggleChannelRecordGroup(channel, RecordGroup::Group1);
+    }
+    InvalidateChannelsHeaders();
 }
 
 int CViewPattern::GetTrackWidth(CHANNELINDEX channel) const
 {
-	return GetNoteTrackWidth(channel) + GetAutomationWidth(channel, AutomationLane::Pan) + GetAutomationWidth(channel, AutomationLane::Volume);
+	return IsTrackVisible(channel) ? GetNoteTrackWidth(channel) + GetAutomationWidth(channel, AutomationLane::Pan) + GetAutomationWidth(channel, AutomationLane::Volume) : 0;
 }
 
 int CViewPattern::GetTrackScrollPixel(CHANNELINDEX channel) const
@@ -8312,6 +8599,8 @@ CHANNELINDEX CViewPattern::GetTrackAtScrollPixel(int pixel) const
 		pixel -= GetTrackWidth(track);
 		track++;
 	}
+    while(track + 1 < sndFile->GetNumChannels() && !IsTrackVisible(track)) track++;
+    while(track > 0 && !IsTrackVisible(track)) track--;
 	return track;
 }
 

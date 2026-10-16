@@ -262,6 +262,10 @@ struct ModChannelSettings
 	uint16 trackInstrument = 0;     // SynMPT: 0 uses the instruments written in patterns.
 	CHANNELINDEX parentBus = CHANNELINDEX_INVALID;
 	bool isBus = false;
+	bool compositeInput = false;   // Bus accepts mapped editor input; recorded notes stay native.
+	bool inputEnabled = false;     // Leaf participates in its composite folder's input.
+	uint8 inputNoteMin = NOTE_MIN, inputNoteMax = NOTE_MAX;
+	int8 inputTranspose = 0;
 
 	mpt::charbuf<MAX_CHANNELNAME> szName;  // Channel name
 };

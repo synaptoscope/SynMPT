@@ -17,6 +17,7 @@
 #include "ColorPickerButton.h"
 #include "EffectInfo.h"
 #include "PatternCursor.h"
+#include "../soundlib/ModChannel.h"
 #include "PluginComboBox.h"
 #include "ResizableDialog.h"
 #include "TrackerSettings.h"
@@ -25,6 +26,28 @@ OPENMPT_NAMESPACE_BEGIN
 
 class CModDoc;
 struct SplitKeyboardSettings;
+
+class CCompositeInputDlg : public DialogBase
+{
+    CModDoc &m_doc;
+    CHANNELINDEX m_bus;
+    std::vector<CHANNELINDEX> m_members;
+    int m_selected = -1;
+    CListBox m_list;
+    CComboBox m_instrument, m_low, m_high;
+    bool StoreLane();
+    void LoadLane();
+protected:
+    BOOL OnInitDialog() override;
+    void OnOK() override;
+    afx_msg void OnLaneChanged();
+    afx_msg void OnSpread();
+    DECLARE_MESSAGE_MAP()
+public:
+    std::vector<ModChannelSettings> tracks;
+    bool enabled = false;
+    CCompositeInputDlg(CModDoc &doc, CHANNELINDEX bus, CWnd *parent);
+};
 
 class CPatternPropertiesDlg : public DialogBase
 {

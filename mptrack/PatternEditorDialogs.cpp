@@ -24,6 +24,7 @@
 #include "WindowMessages.h"
 #include "../common/mptStringBuffer.h"
 #include "../soundlib/mod_specifications.h"
+#include "../soundlib/CompositeInput.h"
 
 
 OPENMPT_NAMESPACE_BEGIN
@@ -2141,5 +2142,128 @@ CString MetronomeSettingsDlg::GetToolTipText(UINT id, HWND) const
 	return s;
 }
 
+
+
+BEGIN_MESSAGE_MAP(CCompositeInputDlg, DialogBase)
+    ON_LBN_SELCHANGE(IDC_COMPOSITE_TRACKS, &CCompositeInputDlg::OnLaneChanged)
+    ON_BN_CLICKED(IDC_COMPOSITE_SPREAD, &CCompositeInputDlg::OnSpread)
+END_MESSAGE_MAP()
+
+CCompositeInputDlg::CCompositeInputDlg(CModDoc &doc, CHANNELINDEX bus, CWnd *parent)
+    : DialogBase(IDD_COMPOSITE_INPUT, parent), m_doc(doc), m_bus(bus), tracks(doc.GetSoundFile().ChnSettings)
+{
+    enabled = tracks[bus].compositeInput;
+    for(CHANNELINDEX channel = 0; channel < tracks.size(); channel++)
+    {
+        auto &track = tracks[channel];
+        if(track.isBus || !TrackBelongsToBus(tracks, channel, bus)) continue;
+        m_members.push_back(channel);
+        if(!enabled && !track.trackInstrument)
+        {
+            for(const auto &pattern : doc.GetSoundFile().Patterns)
+            {
+                for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+                {
+                    const auto &cell = *pattern.GetpModCommand(row, channel);
+                    if(!cell.IsPcNote() && cell.instr) { track.trackInstrument = cell.instr; break; }
+                }
+                if(track.trackInstrument) break;
+            }
+        }
+        if(!enabled && track.trackInstrument) track.inputEnabled = true;
+    }
+}
+
+BOOL CCompositeInputDlg::OnInitDialog()
+{
+    DialogBase::OnInitDialog();
+    SetWindowText(MPT_CFORMAT("Composite instrument: {}")(mpt::ToCString(m_doc.GetSoundFile().GetCharsetInternal(), tracks[m_bus].szName.buf)));
+    m_list.SubclassDlgItem(IDC_COMPOSITE_TRACKS, this);
+    m_instrument.SubclassDlgItem(IDC_COMPOSITE_INSTRUMENT, this);
+    m_low.SubclassDlgItem(IDC_COMPOSITE_LOW, this); m_high.SubclassDlgItem(IDC_COMPOSITE_HIGH, this);
+    CheckDlgButton(IDC_COMPOSITE_ENABLED, enabled ? BST_CHECKED : BST_UNCHECKED);
+    auto &file = m_doc.GetSoundFile();
+    m_instrument.AddString(_T("Choose an instrument...")); m_instrument.SetItemData(0, 0);
+    const auto count = file.GetNumInstruments() ? file.GetNumInstruments() : file.GetNumSamples();
+    for(uint16 instrument = 1; instrument <= count && instrument < MAX_INSTRUMENTS; instrument++)
+    {
+        const auto *name = file.GetNumInstruments() ? file.GetInstrumentName(instrument) : file.GetSampleName(instrument);
+        const auto index = m_instrument.AddString(MPT_CFORMAT("{}: {}")(instrument, mpt::ToCString(file.GetCharsetInternal(), name)));
+        m_instrument.SetItemData(index, instrument);
+    }
+    for(int note = NOTE_MIN; note <= NOTE_MAX; note++)
+    {
+        auto name = mpt::ToCString(file.GetNoteName(static_cast<ModCommand::NOTE>(note)));
+        m_low.AddString(name); m_high.AddString(name);
+    }
+    for(auto member : m_members)
+        m_list.AddString(MPT_CFORMAT("{}: {}")(member + 1, mpt::ToCString(file.GetCharsetInternal(), tracks[member].szName.buf)));
+    if(!m_members.empty()) { m_selected = 0; m_list.SetCurSel(0); LoadLane(); }
+    else { GetDlgItem(IDC_COMPOSITE_ROUTE)->EnableWindow(FALSE); GetDlgItem(IDC_COMPOSITE_SPREAD)->EnableWindow(FALSE); }
+    return TRUE;
+}
+
+bool CCompositeInputDlg::StoreLane()
+{
+    if(m_selected < 0) return true;
+    BOOL valid = FALSE;
+    const int transpose = static_cast<int>(GetDlgItemInt(IDC_COMPOSITE_TRANSPOSE, &valid, TRUE));
+    const bool receives = IsDlgButtonChecked(IDC_COMPOSITE_ROUTE) == BST_CHECKED;
+    const int low = m_low.GetCurSel() + NOTE_MIN, high = m_high.GetCurSel() + NOTE_MIN;
+    const auto instrument = m_instrument.GetCurSel() >= 0 ? static_cast<uint16>(m_instrument.GetItemData(m_instrument.GetCurSel())) : uint16(0);
+    if(!valid || transpose < -119 || transpose > 119 || low < NOTE_MIN || high > NOTE_MAX || low > high || (receives && !instrument))
+    {
+        Reporting::Information(_T("Choose an instrument and a valid key range. Transpose must be between -119 and +119 semitones.")); return false;
+    }
+    auto &track = tracks[m_members[m_selected]];
+    track.trackInstrument = instrument; track.inputEnabled = receives;
+    track.inputNoteMin = static_cast<uint8>(low); track.inputNoteMax = static_cast<uint8>(high); track.inputTranspose = static_cast<int8>(transpose);
+    return true;
+}
+
+void CCompositeInputDlg::LoadLane()
+{
+    const auto &track = tracks[m_members[m_selected]];
+    CheckDlgButton(IDC_COMPOSITE_ROUTE, track.inputEnabled ? BST_CHECKED : BST_UNCHECKED);
+    m_instrument.SetCurSel(0);
+    for(int index = 0; index < m_instrument.GetCount(); index++) if(m_instrument.GetItemData(index) == track.trackInstrument) m_instrument.SetCurSel(index);
+    m_low.SetCurSel(track.inputNoteMin - NOTE_MIN); m_high.SetCurSel(track.inputNoteMax - NOTE_MIN);
+    SetDlgItemInt(IDC_COMPOSITE_TRANSPOSE, track.inputTranspose, TRUE);
+}
+
+void CCompositeInputDlg::OnLaneChanged()
+{
+    const auto next = m_list.GetCurSel();
+    if(!StoreLane()) { m_list.SetCurSel(m_selected); return; }
+    m_selected = next; if(m_selected >= 0) LoadLane();
+}
+
+void CCompositeInputDlg::OnSpread()
+{
+    if(!StoreLane()) return;
+    size_t count = 0; for(auto member : m_members) if(tracks[member].inputEnabled) count++;
+    if(!count) { Reporting::Information(_T("Enable input on at least one lane first.")); return; }
+    const int maximum = (NOTE_MAX - NOTE_MIN + 1) / static_cast<int>(count);
+    if(maximum < 1) { Reporting::Information(_T("There are more enabled lanes than playable keys. Disable some lanes before spreading ranges.")); return; }
+    CInputDlg size(this, _T("How many keys should each enabled lane receive? Each range starts at the same sounding pitch (C-5)."), 1, maximum, std::min(12, maximum));
+    if(size.DoModal() != IDOK) return;
+    int low = NOTE_MIN;
+    for(auto member : m_members) if(tracks[member].inputEnabled)
+    {
+        auto &track = tracks[member]; track.inputNoteMin = static_cast<uint8>(low);
+        track.inputNoteMax = static_cast<uint8>(low + size.resultAsInt - 1);
+        track.inputTranspose = static_cast<int8>(NOTE_MIDDLEC - low); low += size.resultAsInt;
+    }
+    if(m_selected >= 0) LoadLane();
+}
+
+void CCompositeInputDlg::OnOK()
+{
+    if(!StoreLane()) return;
+    enabled = IsDlgButtonChecked(IDC_COMPOSITE_ENABLED) == BST_CHECKED;
+    if(enabled && std::none_of(m_members.begin(), m_members.end(), [&](auto member) { return tracks[member].inputEnabled; }))
+    { Reporting::Information(_T("Enable input on at least one instrument lane.")); return; }
+    DialogBase::OnOK();
+}
 
 OPENMPT_NAMESPACE_END

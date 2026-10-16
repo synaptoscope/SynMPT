@@ -547,13 +547,13 @@ void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth
 	::SelectObject(dc, oldSoloFont);
 	const auto record = GetDocument()->GetChannelRecordGroup(channel);
 	auto recordRect = GetTrackControlRect(channel, DragItem::ChannelRecord);
-	DrawButtonRect(dc, lineWidth, recordRect, record == RecordGroup::Group2 ? "R2" : "R", settings.isBus, record != RecordGroup::NoGroup);
+	DrawButtonRect(dc, lineWidth, recordRect, record == RecordGroup::Group2 ? "R2" : "R", false, record != RecordGroup::NoGroup || IsCompositeTrackArmed(channel));
 	auto routeRect = GetTrackControlRect(channel, DragItem::ChannelRouting);
 	CString route = settings.isBus ? _T("Bus") : _T("Out");
 	if(settings.parentBus < GetSoundFile()->GetNumChannels()) route = mpt::ToCString(GetSoundFile()->GetCharsetInternal(), GetSoundFile()->ChnSettings[settings.parentBus].szName.buf);
 	DrawButtonRect(dc, lineWidth, routeRect, route.GetString());
 	auto instrumentRect = GetTrackControlRect(channel, DragItem::ChannelInstrument);
-	DrawButtonRect(dc, lineWidth, instrumentRect, GetTrackInstrumentLabel(channel).GetString(), settings.isBus);
+	DrawButtonRect(dc, lineWidth, instrumentRect, GetTrackInstrumentLabel(channel).GetString());
 	const auto brush = GetStockBrush(DC_BRUSH);
 	const auto oldFont = ::SelectObject(dc, CMainFrame::GetGUIFont());
 	const int oldMode = ::SetBkMode(dc, TRANSPARENT);
@@ -623,6 +623,7 @@ void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
 	const auto oldBrush = ::SelectObject(dc, GetStockObject(DC_BRUSH));
 	for(CHANNELINDEX channel = static_cast<CHANNELINDEX>(GetXScrollPos()); channel < file->GetNumChannels(); channel++)
 	{
+		if(!IsTrackVisible(channel)) continue;
 		if(GetTrackLeft(channel) >= client.right) break;
 		for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
 		{
@@ -910,6 +911,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 			{
 				if(!pDC->RectVisible(rect))
 					continue;
+				if(!IsTrackVisible(static_cast<CHANNELINDEX>(chn))) continue;
 				const auto &channel = sndFile.ChnSettings[chn];
 				const char *pszfmt = sndFile.m_bChannelMuteTogglePending[chn]? "[Channel %u]" : "Channel %u";
 				if(channel.szName[0] != 0)
@@ -923,6 +925,14 @@ void CViewPattern::OnDraw(CDC *pDC)
 				sprintf(s, pszfmt, chn + 1, channel.szName.buf);
 				DrawButtonRect(m_offScreenDC, lineWidth, rect, "");
 				auto nameRect = GetTrackControlRect(static_cast<CHANNELINDEX>(chn), DragItem::ChannelHeader);
+                const auto fullNameRect = nameRect;
+                if(channel.isBus)
+                {
+                    DrawButtonRect(m_offScreenDC, lineWidth, nameRect, "");
+                    const auto toggle = GetTrackControlRect(static_cast<CHANNELINDEX>(chn), DragItem::FolderToggle);
+                    DrawButtonRect(m_offScreenDC, lineWidth, toggle, m_chnState[chn].folderCollapsed ? ">" : "v");
+                    nameRect.left = toggle.right;
+                }
 				DrawButtonRect(m_offScreenDC, lineWidth, nameRect, s,
 					channel.dwFlags[CHN_MUTE],
 					(m_bInItemRect && m_nDragItem.Type() == DragItem::ChannelHeader && m_nDragItem.Value() == chn) || m_trackSelection.Contains(chn),
@@ -958,6 +968,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 					::FillRect(m_offScreenDC, r, dcBrush);
 				}
 
+				nameRect = fullNameRect;
 				if(m_trackSelection.Contains(chn))
 				{
 					::SetDCBrushColor(m_offScreenDC, GetSysColor(COLOR_HIGHLIGHT));
@@ -970,6 +981,13 @@ void CViewPattern::OnDraw(CDC *pDC)
 				}
 
 				DrawTrackControls(m_offScreenDC, static_cast<CHANNELINDEX>(chn), lineWidth);
+                if(channel.parentBus < numChannels)
+                {
+                    const auto color = sndFile.ChnSettings[channel.parentBus].color;
+                    ::SetDCBrushColor(m_offScreenDC, color == ModChannelSettings::INVALID_COLOR ? GetSysColor(COLOR_HIGHLIGHT) : color);
+                    CRect familyEdge(rect.left, nameRect.bottom, rect.left + lineWidth * 2, GetTrackHeaderHeight());
+                    ::FillRect(m_offScreenDC, familyEdge, dcBrush);
+                }
 				rect.top = rect.bottom = GetTrackHeaderHeight();
 				if(m_Status[psShowVUMeters])
 				{
@@ -1043,7 +1061,7 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 	for(CHANNELINDEX cmk = startChan; cmk < ncols; cmk++)
 	{
 		m_chnState[cmk].selectedCols = selEnable ? m_Selection.GetSelectionBits(cmk) : 0;
-		if(!::RectVisible(hdc, &rect))
+		if(!IsTrackVisible(cmk) || !::RectVisible(hdc, &rect))
 			m_chnState[cmk].selectedCols |= COLUMN_BITS_INVISIBLE;
 		rect.left += GetTrackWidth(cmk);
 		rect.right = rect.left + GetNoteTrackWidth(static_cast<CHANNELINDEX>(std::min<int>(cmk + 1, ncols - 1)));
@@ -1071,6 +1089,7 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 		while(firstVisible < maxcol && (m_chnState[firstVisible].selectedCols & COLUMN_BITS_INVISIBLE)) firstVisible++;
 		for(CHANNELINDEX channel = firstVisible; channel < maxcol; channel++)
 		{
+			if(!IsTrackVisible(channel)) continue;
 			if(ibmp + nColumnWidth > static_cast<UINT>(m_Dib.GetWidth())) break;
 			m_Dib.TextBlt(ibmp + GetNoteTrackWidth(channel) - SEPARATOR_WIDTH, 0, SEPARATOR_WIDTH, m_szCell.cy, pfnt->nClrX + pfnt->nWidth - SEPARATOR_WIDTH, pfnt->nClrY, pfnt->dib);
 			ibmp += GetTrackWidth(channel);
@@ -1194,6 +1213,7 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 		xbmp = nbmp = 0;
 		do
 		{
+			if(!IsTrackVisible(static_cast<CHANNELINDEX>(col))) continue;
 			int x = 0, xClear = 0, bk_col, tx_col, col_sel, fx_col;
 
 			const ModCommand *m = pattern.GetpModCommand(row, static_cast<CHANNELINDEX>(col));
@@ -2085,7 +2105,7 @@ void CViewPattern::UpdateAllVUMeters(Notification *pnotify)
 		m_chnState[nChn].vuMeter = static_cast<uint16>(pnotify->pos[nChn]);
 		if(!isPlaying || pnotify->type[Notification::Stop])
 			m_chnState[nChn].vuMeter = 0;
-		DrawChannelVUMeter(hdc, x, rcClient.top + yPos, nChn);
+		if(IsTrackVisible(nChn)) DrawChannelVUMeter(hdc, x, rcClient.top + yPos, nChn);
 		nChn++;
 		x += GetTrackWidth(static_cast<CHANNELINDEX>(nChn - 1));
 	}
