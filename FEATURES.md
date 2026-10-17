@@ -45,6 +45,8 @@ The owner authorized the gray appearance/font/track-tint pass plus floating-tran
 
 ### Other parked work
 
+- Replace legacy toolbar/menu icons with a coherent set designed for the gray theme. The current appearance pass only adjusts contrast of existing monochrome toolbar artwork.
+
 - Dragging document tabs to reorder them and detaching songs for a second monitor remain explicitly low priority.
 - Musical step-record note lengths, rest/advance/tie controls, a global master track/lane, and separate sample/instrument editor windows remain on the earlier desired list.
 

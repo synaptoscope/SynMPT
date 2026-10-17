@@ -66,11 +66,24 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
             check(pixel(3,3)==RGB(198,58,80) && pixel(16,12)==RGB(255,237,239),"armed record has a red body and round contrasting dot");
             SynMPTTheme::DrawAction(dc,action,L"",RGB(198,58,80),false,true);::GdiFlush();
             check(pixel(3,3)==SynMPTTheme::Color(COLOR_BTNFACE) && pixel(16,12)==RGB(174,53,70),"unarmed record retains its red dot on the neutral button");
+            // Rounded skin uses the native thumb bounds in either orientation.
+            ::FillRect(dc, &action, SynMPTTheme::Brush(COLOR_BTNFACE));
+            SCROLLBARINFO scroll{}; scroll.cbSize=sizeof(scroll);scroll.rcScrollBar={0,0,16,24};
+            scroll.xyThumbTop=3;scroll.xyThumbBottom=21;
+            SynMPTTheme::DrawScrollBar(dc,scroll,true,false);::GdiFlush();
+            check(pixel(8,12)==RGB(94,102,115) && pixel(4,4)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"vertical scrollbar has a rounded inset thumb");
+            check(pixel(17,12)==SynMPTTheme::Color(COLOR_BTNFACE),"scrollbar paint is clipped to its native bounds");
+            scroll.rcScrollBar={0,0,32,16};scroll.xyThumbTop=4;scroll.xyThumbBottom=28;
+            SynMPTTheme::DrawScrollBar(dc,scroll,false,true);::GdiFlush();
+            check(pixel(16,8)==RGB(130,140,155) && pixel(5,4)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"horizontal scrollbar rounds and responds to hover");
+            scroll.rgstate[0]=STATE_SYSTEM_UNAVAILABLE;
+            SynMPTTheme::DrawScrollBar(dc,scroll,false,true);::GdiFlush();
+            check(pixel(16,8)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"disabled scrollbar hides its unusable thumb");
             ::SelectObject(dc,oldBitmap);::DeleteObject(bitmap);::DeleteDC(dc);
         }
         PatternFont::UpdateFont(nullptr);
         check(PatternFont::currentFont && PatternFont::currentFont->dib && PatternFont::currentFont->dib->antialiased,"modern pattern font builds a coverage atlas");
-        log<<"PASS: track tint ownership, selection and syntax colors, antialiased glyph compositing, active M/S/record buttons and modern pattern font\n";
+        log<<"PASS: track tint ownership, selection and syntax colors, antialiased glyph compositing, active M/S/record buttons, modern pattern font and rounded/hover/disabled scrollbar skin\n";
         auto file=std::make_unique<Fixture>();
         file->m_nSamples=2;
         file->Patterns.Insert(0,64);file->Patterns.Insert(1,64);

@@ -92,6 +92,11 @@ struct CommentsViewState
 
 
 
+class CSynMPTSplitterWnd : public CSplitterWnd
+{
+    void OnDrawSplitter(CDC *dc, ESplitType type, const CRect &rect) override;
+};
+
 class CChildFrame: public CMDIChildWnd
 {
 	friend class CModControlDlg;
@@ -106,7 +111,7 @@ protected:
 
 // Attributes
 protected:
-	CSplitterWnd m_wndSplitter;
+	CSynMPTSplitterWnd m_wndSplitter;
 	HWND m_hWndCtrl = nullptr, m_hWndView = nullptr;
 	GeneralViewState m_ViewGeneral;
 	PatternViewState m_ViewPatterns;

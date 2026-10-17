@@ -8,6 +8,8 @@ namespace SynMPTTheme
 COLORREF Color(int index);
 HBRUSH Brush(int index);
 COLORREF Mix(COLORREF background, COLORREF accent, unsigned percent);
+// Draws only; native scrollbar geometry, accessibility and input stay with Windows.
+void DrawScrollBar(HDC dc, const SCROLLBARINFO &info, bool vertical, bool hot);
 void RegisterWindow(HWND window);
 void RefreshWindows();
 bool HandleTransportKey(const MSG &message);

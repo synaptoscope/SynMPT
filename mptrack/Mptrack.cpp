@@ -3021,6 +3021,51 @@ void DrawAction(HDC dc, const RECT &bounds, const wchar_t *label, COLORREF accen
     ::RestoreDC(dc, saved);
 }
 
+void DrawScrollBar(HDC dc, const SCROLLBARINFO &info, bool vertical, bool hot)
+{
+    const int saved = ::SaveDC(dc);
+    const CRect bounds(info.rcScrollBar);
+    ::IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    ::FillRect(dc, bounds, Brush(COLOR_APPWORKSPACE));
+    const int thickness = vertical ? bounds.Width() : bounds.Height();
+    const int length = vertical ? bounds.Height() : bounds.Width();
+    const int inset = std::max(2, thickness / 4);
+    const bool enabled = !(info.rgstate[0] & STATE_SYSTEM_UNAVAILABLE);
+    if(enabled && !(info.rgstate[3] & STATE_SYSTEM_UNAVAILABLE) && info.xyThumbBottom > info.xyThumbTop)
+    {
+        CRect thumb(bounds);
+        const int start = std::clamp(info.xyThumbTop, 0, length);
+        const int end = std::clamp(info.xyThumbBottom, start, length);
+        if(vertical) { thumb.top += start; thumb.bottom = bounds.top + end; thumb.DeflateRect(inset, 1); }
+        else { thumb.left += start; thumb.right = bounds.left + end; thumb.DeflateRect(1, inset); }
+        if(!thumb.IsRectEmpty())
+        {
+            const bool pressed = (info.rgstate[3] & STATE_SYSTEM_PRESSED) != 0;
+            ::SelectObject(dc, GetStockObject(NULL_PEN)); ::SelectObject(dc, GetStockObject(DC_BRUSH));
+            ::SetDCBrushColor(dc, pressed ? RGB(156,174,197) : hot ? RGB(130,140,155) : RGB(94,102,115));
+            const int diameter = std::min(thumb.Width(), thumb.Height());
+            ::RoundRect(dc, thumb.left, thumb.top, thumb.right, thumb.bottom, diameter, diameter);
+        }
+    }
+    // Keep the familiar arrow targets, using small chevrons without raised boxes.
+    ::SelectObject(dc, GetStockObject(DC_PEN));
+    const int button = std::min(info.dxyLineButton, length / 2);
+    const int chevron = std::max(2, thickness / 6);
+    for(int end = 0; button > 0 && end < 2; end++)
+    {
+        const bool unavailable = !enabled || (info.rgstate[end ? 5 : 1] & STATE_SYSTEM_UNAVAILABLE);
+        ::SetDCPenColor(dc, Color(unavailable ? COLOR_3DLIGHT : COLOR_GRAYTEXT));
+        const int x = vertical ? bounds.CenterPoint().x : bounds.left + (end ? length - button / 2 : button / 2);
+        const int y = vertical ? bounds.top + (end ? length - button / 2 : button / 2) : bounds.CenterPoint().y;
+        const int direction = end ? 1 : -1;
+        if(vertical)
+        { ::MoveToEx(dc, x - chevron, y - direction, nullptr); ::LineTo(dc, x, y + direction); ::LineTo(dc, x + chevron + 1, y - direction); }
+        else
+        { ::MoveToEx(dc, x - direction, y - chevron, nullptr); ::LineTo(dc, x + direction, y); ::LineTo(dc, x - direction, y + chevron + 1); }
+    }
+    ::RestoreDC(dc, saved);
+}
+
 namespace
 {
 std::vector<HWND> roots;
@@ -3155,6 +3200,203 @@ void PaintButton(HWND window, HDC dc)
     ::SelectObject(dc, oldFont);
 }
 
+
+constexpr UINT_PTR ScrollPaintTimer = 0x53594E53;
+struct ScrollAppearance { SCROLLBARINFO bars[2]{}; };
+std::map<HWND, ScrollAppearance> scrollAppearances;
+
+bool ScrollInfo(HWND window, LONG object, SCROLLBARINFO &info)
+{
+    info = {}; info.cbSize = sizeof(info);
+    return ::GetScrollBarInfo(window, object, &info)
+        && !(info.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN))
+        && info.rcScrollBar.right > info.rcScrollBar.left && info.rcScrollBar.bottom > info.rcScrollBar.top;
+}
+
+void PaintScrollBars(HWND window)
+{
+    if(!::IsWindowVisible(window)) return;
+    const bool control = Class(window) == L"ScrollBar";
+    const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
+    if(!control && !(style & (WS_HSCROLL | WS_VSCROLL))) return;
+    const auto dc = control ? ::GetDC(window) : ::GetWindowDC(window);
+    if(!dc) return;
+    RECT frame{}; ::GetWindowRect(window, &frame);
+    POINT origin{frame.left, frame.top}, pointer{};
+    if(control) { origin = {}; ::ClientToScreen(window, &origin); }
+    ::GetCursorPos(&pointer);
+    ScrollAppearance appearance;
+    for(int axis = 0; axis < 2; axis++)
+    {
+        const bool vertical = control ? (style & SBS_VERT) != 0 : axis == 1;
+        auto &info = appearance.bars[axis];
+        if((control && axis != 0) || !ScrollInfo(window, control ? OBJID_CLIENT : vertical ? OBJID_VSCROLL : OBJID_HSCROLL, info)) continue;
+        const bool hot = ::PtInRect(&info.rcScrollBar, pointer) != FALSE;
+        ::OffsetRect(&info.rcScrollBar, -origin.x, -origin.y);
+        DrawScrollBar(dc, info, vertical, hot);
+    }
+    if(!control && (style & WS_HSCROLL) && (style & WS_VSCROLL))
+    {
+        // The corner belongs to neither bar; its native size-grip behavior is retained.
+        const auto &h = appearance.bars[0].rcScrollBar; const auto &v = appearance.bars[1].rcScrollBar;
+        RECT corner{v.left, h.top, v.right, h.bottom};
+        if(!::IsRectEmpty(&corner)) ::FillRect(dc, &corner, Brush(COLOR_APPWORKSPACE));
+    }
+    ::ReleaseDC(window, dc);
+    scrollAppearances[window] = appearance;
+}
+
+void RefreshScrollBars(HWND window)
+{
+    const auto found = scrollAppearances.find(window);
+    if(found == scrollAppearances.end()) return;
+    const bool control = Class(window) == L"ScrollBar";
+    RECT frame{}; ::GetWindowRect(window, &frame);
+    POINT origin{frame.left, frame.top};
+    if(control) { origin = {}; ::ClientToScreen(window, &origin); }
+    for(int axis = 0; axis < (control ? 1 : 2); axis++)
+    {
+        SCROLLBARINFO current{};
+        if(ScrollInfo(window, control ? OBJID_CLIENT : axis ? OBJID_VSCROLL : OBJID_HSCROLL, current))
+            ::OffsetRect(&current.rcScrollBar, -origin.x, -origin.y);
+        if(std::memcmp(&current, &found->second.bars[axis], sizeof(current))) { PaintScrollBars(window); return; }
+    }
+}
+
+void CALLBACK ScrollTimerProc(HWND window, UINT, UINT_PTR, DWORD) { PaintScrollBars(window); }
+
+void PaintTabs(HWND window, HDC dc)
+{
+    RECT bounds{}; ::GetClientRect(window, &bounds);
+    ::FillRect(dc, &bounds, Brush(COLOR_BTNFACE));
+    const int saved = ::SaveDC(dc);
+    const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
+    const int selected = TabCtrl_GetCurSel(window);
+    const int dpi = HighDPISupport::GetDpiForWindow(window), padding = MulDiv(6, dpi, 96);
+    ::SelectObject(dc, reinterpret_cast<HFONT>(::SendMessage(window, WM_GETFONT, 0, 0)));
+    ::SetBkMode(dc, TRANSPARENT);
+    for(int index = 0; index < TabCtrl_GetItemCount(window); index++)
+    {
+        RECT item{}; if(!TabCtrl_GetItemRect(window, index, &item)) continue;
+        if(style & TCS_OWNERDRAWFIXED)
+        {
+            DRAWITEMSTRUCT draw{}; draw.CtlType = ODT_TAB; draw.CtlID = ::GetDlgCtrlID(window);
+            draw.itemID = index; draw.itemAction = ODA_DRAWENTIRE; draw.itemState = index == selected ? ODS_SELECTED : 0;
+            draw.hwndItem = window; draw.hDC = dc; draw.rcItem = item;
+            TCITEMW data{}; data.mask = TCIF_PARAM; ::SendMessageW(window, TCM_GETITEMW, index, reinterpret_cast<LPARAM>(&data)); draw.itemData = data.lParam;
+            // Preserve the document-tab labels, close buttons and parent reflection.
+            ::SendMessage(::GetParent(window), WM_DRAWITEM, draw.CtlID, reinterpret_cast<LPARAM>(&draw));
+            continue;
+        }
+        CRect rect(item); rect.DeflateRect(1, 1);
+        ::SelectObject(dc, GetStockObject(NULL_PEN)); ::SelectObject(dc, GetStockObject(DC_BRUSH));
+        ::SetDCBrushColor(dc, Color(index == selected ? COLOR_3DLIGHT : COLOR_WINDOW));
+        ::RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, padding, padding);
+        if(index == selected)
+        { CRect accent(rect); accent.top = accent.bottom - std::max(2, MulDiv(2,dpi,96)); ::FillRect(dc, accent, Brush(COLOR_HIGHLIGHT)); }
+        wchar_t label[512]{}; TCITEMW data{}; data.mask = TCIF_TEXT | TCIF_IMAGE;
+        data.pszText = label; data.cchTextMax = 512; data.iImage = -1;
+        ::SendMessageW(window, TCM_GETITEMW, index, reinterpret_cast<LPARAM>(&data));
+        rect.left += padding;
+        const auto images = TabCtrl_GetImageList(window);
+        if(images && data.iImage >= 0)
+        {
+            int width = 0, height = 0; ::ImageList_GetIconSize(images, &width, &height);
+            ::ImageList_Draw(images, data.iImage, dc, rect.left, rect.CenterPoint().y - height / 2, ILD_TRANSPARENT);
+            rect.left += width + padding;
+        }
+        rect.right -= padding;
+        ::SetTextColor(dc, Color(::IsWindowEnabled(window) ? COLOR_BTNTEXT : COLOR_GRAYTEXT));
+        ::DrawTextW(dc, label, -1, rect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+    ::RestoreDC(dc, saved);
+}
+
+void PaintHeader(HWND window, HDC dc)
+{
+    RECT bounds{}; ::GetClientRect(window, &bounds);
+    ::FillRect(dc, &bounds, Brush(COLOR_BTNFACE));
+    const int saved = ::SaveDC(dc), padding = MulDiv(6, HighDPISupport::GetDpiForWindow(window), 96);
+    ::SelectObject(dc, reinterpret_cast<HFONT>(::SendMessage(window, WM_GETFONT, 0, 0)));
+    ::SetTextColor(dc, Color(COLOR_BTNTEXT)); ::SetBkMode(dc, TRANSPARENT);
+    const auto images = Header_GetImageList(window);
+    POINT pointer{}; ::GetCursorPos(&pointer); ::ScreenToClient(window, &pointer);
+    for(int index = 0; index < Header_GetItemCount(window); index++)
+    {
+        RECT item{}; if(!Header_GetItemRect(window, index, &item)) continue;
+        wchar_t label[512]{}; HDITEMW data{}; data.mask = HDI_TEXT | HDI_FORMAT | HDI_IMAGE | HDI_LPARAM;
+        data.pszText = label; data.cchTextMax = 512; data.iImage = -1;
+        ::SendMessageW(window, HDM_GETITEMW, index, reinterpret_cast<LPARAM>(&data));
+        if(data.fmt & HDF_OWNERDRAW)
+        {
+            DRAWITEMSTRUCT draw{}; draw.CtlType = ODT_HEADER; draw.CtlID = ::GetDlgCtrlID(window);
+            draw.itemID = index; draw.itemAction = ODA_DRAWENTIRE; draw.hwndItem = window;
+            draw.hDC = dc; draw.rcItem = item; draw.itemData = data.lParam;
+            ::SendMessage(::GetParent(window), WM_DRAWITEM, draw.CtlID, reinterpret_cast<LPARAM>(&draw)); continue;
+        }
+        CRect rect(item);
+        ::FillRect(dc, rect, Brush(::PtInRect(&item,pointer) ? COLOR_3DLIGHT : COLOR_BTNFACE));
+        CRect edge(rect); edge.left = edge.right - 1; ::FillRect(dc, edge, Brush(COLOR_BTNSHADOW));
+        rect.DeflateRect(padding, 1);
+        if((data.fmt & HDF_IMAGE) && data.iImage >= 0 && images)
+        {
+            int width = 0, height = 0; ::ImageList_GetIconSize(images, &width, &height);
+            ::ImageList_Draw(images, data.iImage, dc, rect.left, rect.CenterPoint().y - height / 2, ILD_TRANSPARENT);
+            rect.left += width + padding;
+        }
+        if(data.fmt & (HDF_SORTUP | HDF_SORTDOWN))
+        {
+            CRect sort(rect); sort.left = std::max(sort.left, sort.right - padding * 2);
+            ::DrawTextW(dc, data.fmt & HDF_SORTUP ? L"\u25b4" : L"\u25be", -1, sort, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            rect.right = sort.left;
+        }
+        ::DrawTextW(dc, label, -1, rect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX
+            | ((data.fmt & HDF_JUSTIFYMASK) == HDF_RIGHT ? DT_RIGHT : (data.fmt & HDF_JUSTIFYMASK) == HDF_CENTER ? DT_CENTER : DT_LEFT));
+    }
+    ::RestoreDC(dc, saved);
+}
+
+void PaintNonClient(HWND window)
+{
+    const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
+    const auto extended = ::GetWindowLongPtr(window, GWL_EXSTYLE);
+    // Windows keeps the main title bar. App tool captions and child pane borders are ours.
+    const bool toolCaption = (extended & WS_EX_TOOLWINDOW) && (style & WS_CAPTION) == WS_CAPTION;
+    const bool captionless = (style & WS_CAPTION) != WS_CAPTION;
+    if(!toolCaption && !captionless) { PaintScrollBars(window); return; }
+    RECT frame{}, client{}; ::GetWindowRect(window, &frame); ::GetClientRect(window, &client);
+    POINT offset{}; ::ClientToScreen(window, &offset);
+    ::OffsetRect(&client, offset.x - frame.left, offset.y - frame.top);
+    ::OffsetRect(&frame, -frame.left, -frame.top);
+    const auto dc = ::GetWindowDC(window); if(!dc) return;
+    const int saved = ::SaveDC(dc);
+    ::ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
+    ::FillRect(dc, &frame, Brush(COLOR_BTNFACE));
+    ::FrameRect(dc, &frame, Brush(COLOR_BTNSHADOW));
+    ::RestoreDC(dc, saved);
+    if(toolCaption)
+    {
+        // Native hit testing still moves/closes the frame; title geometry comes from Windows.
+        TITLEBARINFO title{}; title.cbSize = sizeof(title);
+        if(::GetTitleBarInfo(window, &title))
+        {
+            CRect caption(title.rcTitleBar); caption.OffsetRect(-offset.x + client.left, -offset.y + client.top);
+            caption.IntersectRect(caption, &frame);
+            const int button = caption.Height();
+            CRect close(caption); close.left = std::max(close.left, close.right - button);
+            const int state = ::SaveDC(dc);
+            ::SelectObject(dc, CMainFrame::GetGUIFont()); ::SetBkMode(dc, TRANSPARENT); ::SetTextColor(dc, Color(COLOR_BTNTEXT));
+            if(style & WS_SYSMENU) ::DrawTextW(dc, L"\u00d7", -1, close, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            caption.left += MulDiv(6, HighDPISupport::GetDpiForWindow(window), 96); caption.right = close.left - 4;
+            wchar_t label[512]{}; ::GetWindowTextW(window, label, 512);
+            ::DrawTextW(dc, label, -1, caption, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            ::RestoreDC(dc, state);
+        }
+    }
+    ::ReleaseDC(window, dc);
+    PaintScrollBars(window);
+}
+
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
 {
     const auto cls = Class(window);
@@ -3181,6 +3423,34 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             || (permanent && dynamic_cast<CControlBar *>(permanent)))
         { RECT rect{}; ::GetClientRect(window, &rect); ::FillRect(reinterpret_cast<HDC>(wParam), &rect, Brush(COLOR_BTNFACE)); return TRUE; }
     }
+    if((message == WM_PAINT || message == WM_PRINTCLIENT) && (cls == L"SysTabControl32" || cls == L"SysHeader32"))
+    {
+        PAINTSTRUCT paint{};
+        const auto dc = message == WM_PRINTCLIENT ? reinterpret_cast<HDC>(wParam) : ::BeginPaint(window, &paint);
+        if(cls == L"SysTabControl32") PaintTabs(window, dc); else PaintHeader(window, dc);
+        if(message == WM_PAINT) ::EndPaint(window, &paint);
+        return 0;
+    }
+    if(message == WM_PAINT && cls == L"ScrollBar")
+    {
+        PAINTSTRUCT paint{}; ::BeginPaint(window, &paint); ::EndPaint(window, &paint);
+        PaintScrollBars(window); return 0;
+    }
+    if((message == WM_NCLBUTTONDOWN && (wParam == HTHSCROLL || wParam == HTVSCROLL))
+        || (message == WM_LBUTTONDOWN && cls == L"ScrollBar"))
+    {
+        // Windows' native tracking loop preserves SIF_TRACKPOS (32-bit pattern/sample positions).
+        const auto timer = ::SetTimer(window, ScrollPaintTimer, 16, ScrollTimerProc);
+        const auto result = ::DefSubclassProc(window, message, wParam, lParam);
+        if(timer) ::KillTimer(window, timer);
+        if(::IsWindow(window)) PaintScrollBars(window);
+        return result;
+    }
+    if(message == WM_NCMOUSEMOVE || (message == WM_MOUSEMOVE && cls == L"ScrollBar"))
+    {
+        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE | (message == WM_NCMOUSEMOVE ? TME_NONCLIENT : 0u), window, 0};
+        ::TrackMouseEvent(&track);
+    }
     if(message == WM_PAINT && cls == L"Button")
     {
         const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
@@ -3206,29 +3476,42 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
         }
     }
-    if(message == WM_NCDESTROY) ::RemoveWindowSubclass(window, WindowProc, ThemeSubclassID);
-    return ::DefSubclassProc(window, message, wParam, lParam);
+    if(message == WM_NCDESTROY)
+    {
+        ::KillTimer(window, ScrollPaintTimer); scrollAppearances.erase(window);
+        ::RemoveWindowSubclass(window, WindowProc, ThemeSubclassID);
+        return ::DefSubclassProc(window, message, wParam, lParam);
+    }
+    const auto result = ::DefSubclassProc(window, message, wParam, lParam);
+    if(message == WM_NCPAINT || message == WM_NCACTIVATE || message == WM_SETTEXT)
+        PaintNonClient(window);
+    else if(message == WM_PAINT || message == WM_SIZE || message == WM_WINDOWPOSCHANGED
+        || message == WM_HSCROLL || message == WM_VSCROLL || message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL
+        || message == WM_NCMOUSEMOVE || message == WM_NCMOUSELEAVE || message == WM_MOUSELEAVE
+        || (message == WM_MOUSEMOVE && cls == L"ScrollBar"))
+        PaintScrollBars(window);
+    return result;
 }
 
 BOOL CALLBACK Apply(HWND window, LPARAM)
 {
     DWORD_PTR data{};
-    if(::GetWindowSubclass(window, WindowProc, ThemeSubclassID, &data)) return TRUE;
+    if(::GetWindowSubclass(window, WindowProc, ThemeSubclassID, &data)) { RefreshScrollBars(window); return TRUE; }
     const auto cls = Class(window);
     // Limit skinning to our registered native controls, retaining custom editor painting.
-    if(cls == L"Button" || cls == L"Edit" || cls == L"Static" || cls == L"ComboBox" || cls == L"ListBox"
+    if(cls == L"ScrollBar" || cls == L"Button" || cls == L"Edit" || cls == L"Static" || cls == L"ComboBox" || cls == L"ListBox"
         || cls == L"SysTreeView32" || cls == L"SysListView32" || cls == L"SysHeader32" || cls == L"SysTabControl32"
         || cls == L"ToolbarWindow32" || cls == L"msctls_statusbar32" || cls == L"msctls_trackbar32"
         || cls == L"msctls_updown32" || cls == L"#32770" || cls == L"MDIClient" || cls.rfind(L"Afx", 0) == 0)
     {
         ::SetWindowSubclass(window, WindowProc, ThemeSubclassID, 0);
-        if(cls == L"Button" || cls == L"SysTabControl32" || cls == L"SysTreeView32" || cls == L"SysListView32")
+        if(cls == L"Button" || cls == L"SysTabControl32" || cls == L"SysHeader32" || cls == L"SysTreeView32" || cls == L"SysListView32")
             ::SetWindowTheme(window, L"", L"");
         if(cls == L"SysTreeView32")
         { TreeView_SetBkColor(window, Color(COLOR_WINDOW)); TreeView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
         if(cls == L"SysListView32")
         { ListView_SetBkColor(window, Color(COLOR_WINDOW)); ListView_SetTextBkColor(window, Color(COLOR_WINDOW)); ListView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
-        ::InvalidateRect(window, nullptr, TRUE);
+        ::RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
     }
     return TRUE;
 }

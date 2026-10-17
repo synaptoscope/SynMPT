@@ -46,6 +46,19 @@ void COctaveEdit::OnChar(UINT nChar, UINT /*nRepCnt*/, UINT /*nFlags*/)
 /////////////////////////////////////////////////////////////////////
 // CToolBarEx: custom toolbar base class
 
+void CToolBarEx::DrawBorders(CDC *dc, CRect &rect)
+{
+    const CRect outer(rect);
+    // Let MFC reserve its exact border sizes without painting its light bevels.
+    const int native = dc->SaveDC(); dc->ExcludeClipRect(outer);
+    CToolBar::DrawBorders(dc, rect); dc->RestoreDC(native);
+    const int border = dc->SaveDC(); dc->ExcludeClipRect(rect);
+    dc->FillSolidRect(outer, SynMPTTheme::Color(COLOR_BTNFACE));
+    dc->FrameRect(outer, CBrush::FromHandle(SynMPTTheme::Brush(COLOR_BTNSHADOW)));
+    dc->RestoreDC(border);
+}
+
+
 void CToolBarEx::SetHorizontal()
 {
 	m_bVertical = false;
@@ -1483,6 +1496,19 @@ LRESULT CModTreeBar::OnNcHitTest(CPoint point)
 	if(!rect.PtInRect(point))
 		return HTBORDER;
 	return CDialogBar::OnNcHitTest(point);
+}
+
+
+void CModTreeBar::DrawBorders(CDC *dc, CRect &rect)
+{
+    const CRect outer(rect);
+    // Let MFC reserve its exact border sizes without painting its light bevels.
+    const int native = dc->SaveDC(); dc->ExcludeClipRect(outer);
+    CDialogBar::DrawBorders(dc, rect); dc->RestoreDC(native);
+    const int border = dc->SaveDC(); dc->ExcludeClipRect(rect);
+    dc->FillSolidRect(outer, SynMPTTheme::Color(COLOR_BTNFACE));
+    dc->FrameRect(outer, CBrush::FromHandle(SynMPTTheme::Brush(COLOR_BTNSHADOW)));
+    dc->RestoreDC(border);
 }
 
 

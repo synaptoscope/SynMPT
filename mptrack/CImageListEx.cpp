@@ -36,7 +36,32 @@ bool CImageListEx::Create(UINT resourceID, int cx, int cy, int nInitial, int nGr
 	const bool isDark = mpt::Color::GetLuma(buttonColor.r, buttonColor.g, buttonColor.b) < 128;
 	if(isDark)
 	{
-		// Invert brightness of icons on dark themes
+        for(int img = 0; img < static_cast<int>(bitmap->Width()) / cx; img++)
+        {
+            if(std::find(invertImages.begin(), invertImages.end(), img) != invertImages.end()) continue;
+            unsigned colored = 0, neutral = 0;
+            for(int y = 0; y < cy; y++) for(int x = 0; x < cx; x++)
+            {
+                const auto &pixel = (*bitmap)(img * cx + x, y);
+                if(pixel.a < 128) continue;
+                const int high = std::max({pixel.r, pixel.g, pixel.b}), low = std::min({pixel.r, pixel.g, pixel.b});
+                if(high - low > 40) colored++; else neutral++;
+            }
+            if(!neutral || colored * 10 > neutral) continue;
+            for(int y = 0; y < cy; y++) for(int x = 0; x < cx; x++)
+            {
+                auto &pixel = (*bitmap)(img * cx + x, y);
+                if(!pixel.a) continue;
+                const int high = std::max({pixel.r, pixel.g, pixel.b}), low = std::min({pixel.r, pixel.g, pixel.b});
+                if(high < 128 && high - low <= 40)
+                {
+                    pixel.r = static_cast<uint8>(std::min(255, pixel.r + 140));
+                    pixel.g = static_cast<uint8>(std::min(255, pixel.g + 140));
+                    pixel.b = static_cast<uint8>(std::min(255, pixel.b + 140));
+                }
+            }
+        }
+        // Invert brightness of icons on dark themes
 		for(const int img : invertImages)
 		{
 			for(int y = 0; y < cy; y++)

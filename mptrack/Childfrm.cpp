@@ -10,6 +10,7 @@
 
 #include "stdafx.h"
 #include "Childfrm.h"
+#include "SynMPTTheme.h"
 #include "ChannelManagerDlg.h"
 #include "Ctrl_ins.h"
 #include "Ctrl_pat.h"
@@ -39,6 +40,17 @@ OPENMPT_NAMESPACE_BEGIN
 
 /////////////////////////////////////////////////////////////////////////////
 // CChildFrame
+
+void CSynMPTSplitterWnd::OnDrawSplitter(CDC *dc, ESplitType type, const CRect &rect)
+{
+    if(!dc) { RedrawWindow(rect, nullptr, RDW_INVALIDATE | RDW_NOCHILDREN); return; }
+    if(type == splitBorder)
+    {
+        dc->FrameRect(rect, CBrush::FromHandle(SynMPTTheme::Brush(COLOR_BTNSHADOW)));
+        CRect inner(rect); inner.DeflateRect(1, 1);
+        dc->FrameRect(inner, CBrush::FromHandle(SynMPTTheme::Brush(COLOR_BTNFACE)));
+    } else dc->FillSolidRect(rect, SynMPTTheme::Color(COLOR_BTNFACE));
+}
 
 IMPLEMENT_DYNCREATE(CChildFrame, CMDIChildWnd)
 

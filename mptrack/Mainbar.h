@@ -86,6 +86,7 @@ public:
 
 public:
 	//{{AFX_VIRTUAL(CToolBarEx)
+	void DrawBorders(CDC *dc, CRect &rect) override;
 	CSize CalcDynamicLayout(int nLength, DWORD dwMode) override;
 	virtual void SetHorizontal();
 	virtual void SetVertical();
@@ -269,6 +270,7 @@ public:
 
 protected:
 	//{{AFX_VIRTUAL(CModTreeBar)
+	void DrawBorders(CDC *dc, CRect &rect) override;
 	CSize CalcFixedLayout(BOOL bStretch, BOOL bHorz) override;
 	BOOL PreTranslateMessage(MSG *pMsg) override;
 	//}}AFX_VIRTUAL
