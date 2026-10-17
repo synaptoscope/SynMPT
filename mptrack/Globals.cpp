@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "Globals.h"
+#include "SynMPTTheme.h"
 #include "Childfrm.h"
 #include "Ctrl_com.h"
 #include "Ctrl_gen.h"
@@ -109,7 +110,7 @@ LRESULT CModControlDlg::OnModCtrlMsg(WPARAM wParam, LPARAM lParam)
 	switch(wParam)
 	{
 	case CTRLMSG_SETVIEWWND:
-		m_hWndView = reinterpret_cast<HWND>(lParam);
+		SetViewWnd(reinterpret_cast<HWND>(lParam));
 		break;
 
 	case CTRLMSG_ACTIVATEPAGE:
@@ -126,6 +127,17 @@ LRESULT CModControlDlg::OnModCtrlMsg(WPARAM wParam, LPARAM lParam)
 		break;
 	}
 	return 0;
+}
+
+
+void CModControlDlg::SetViewWnd(HWND hwndView)
+{
+	// Cached pages may outlive several different lower editors. In particular,
+	// never send a typed SAVE/LOADSTATE pointer to a different kind of view when
+	// another tab is selected before its queued replacement has completed.
+	const auto *view = CWnd::FromHandlePermanent(hwndView);
+	const auto *expected = GetAssociatedViewClass();
+	m_hWndView = view && expected && view->IsKindOf(expected) ? hwndView : nullptr;
 }
 
 
@@ -168,7 +180,8 @@ BOOL CModTabCtrl::Create(DWORD dwStyle, const RECT& rect, CWnd* pParentWnd, UINT
 {
 	CMainFrame *pMainFrm = CMainFrame::GetMainFrame();
 	if (!pMainFrm) return FALSE;
-	if (!CTabCtrl::Create(dwStyle, rect, pParentWnd, nID)) return FALSE;
+	// Editor pages are siblings, not children, of this full-size tab control.
+	if (!CTabCtrl::Create(dwStyle | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, rect, pParentWnd, nID)) return FALSE;
 	OnDPIChanged();
 	return TRUE;
 }
@@ -212,6 +225,7 @@ BEGIN_MESSAGE_MAP(CModControlView, CView)
 	//{{AFX_MSG_MAP(CModControlView)
 	ON_WM_SIZE()
 	ON_WM_DESTROY()
+	ON_WM_ERASEBKGND()
 	ON_WM_SETFOCUS()
 	ON_MESSAGE(WM_DPICHANGED_AFTERPARENT,  &CModControlView::OnDPIChangedAfterParent)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TABCTRL1, &CModControlView::OnTabSelchange)
@@ -232,6 +246,7 @@ CModDoc *CModControlView::GetDocument() const noexcept { return static_cast<CMod
 void CModControlView::OnInitialUpdate() // called first time after construct
 {
 	CView::OnInitialUpdate();
+	ModifyStyle(0, WS_CLIPCHILDREN);
 	CRect rect;
 
 	CChildFrame *pParentFrame = (CChildFrame *)GetParentFrame();
@@ -240,6 +255,15 @@ void CModControlView::OnInitialUpdate() // called first time after construct
 	m_TabCtrl.Create(WS_CHILD|WS_VISIBLE|TCS_FOCUSNEVER|TCS_FORCELABELLEFT, rect, this, IDC_TABCTRL1);
 	UpdateView(UpdateHint().ModType());
 	SetActivePage(Page::Patterns);
+	SynMPTTheme::RegisterWindow(m_hWnd);
+}
+
+
+BOOL CModControlView::OnEraseBkgnd(CDC *dc)
+{
+	CRect rect; GetClientRect(rect);
+	dc->FillSolidRect(rect, SynMPTTheme::Color(COLOR_BTNFACE));
+	return TRUE;
 }
 
 
@@ -406,6 +430,9 @@ bool CModControlView::SetActivePage(Page page, LPARAM lParam)
 	pMainFrm->SetUserText(_T(""));
 	pMainFrm->SetInfoText(_T(""));
 	pMainFrm->SetXInfoText(_T(""));
+	// OnInitDialog may create more controls after the base initialization.
+	pDlg->ModifyStyle(0, WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+	SynMPTTheme::RegisterWindow(pDlg->m_hWnd);
 	pDlg->ShowWindow(SW_SHOW);
 	static_cast<CChildFrame *>(GetParentFrame())->SetSplitterHeight(pDlg->GetSplitPosRef());
 	if(m_hWndMDI)
@@ -576,6 +603,7 @@ IMPLEMENT_SERIAL(CModScrollView, CScrollView, 0)
 BEGIN_MESSAGE_MAP(CModScrollView, CScrollView)
 	//{{AFX_MSG_MAP(CModScrollView)
 	ON_WM_DESTROY()
+	ON_WM_ERASEBKGND()
 	ON_WM_MOUSEWHEEL()
 	ON_WM_MOUSEHWHEEL()
 	ON_WM_SETFOCUS()
@@ -656,6 +684,16 @@ LRESULT CModScrollView::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 void CModScrollView::OnInitialUpdate()
 {
 	m_dpi = HighDPISupport::GetDpiForWindow(m_hWnd);
+	ModifyStyle(0, WS_CLIPCHILDREN);
+}
+
+
+BOOL CModScrollView::OnEraseBkgnd(CDC *dc)
+{
+	// Custom pattern/waveform/envelope handlers still override this base fallback.
+	CRect rect; GetClientRect(rect);
+	dc->FillSolidRect(rect, SynMPTTheme::Color(COLOR_BTNFACE));
+	return TRUE;
 }
 
 

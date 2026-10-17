@@ -192,6 +192,7 @@ void CViewGlobals::OnInitialUpdate()
 	m_nCurrentPlugin = 0;
 	m_nCurrentParam = 0;
 	CFormView::OnInitialUpdate();
+	ModifyStyle(0, WS_CLIPCHILDREN);
 	EnableToolTips();
 
 	if (pFrame)
@@ -246,8 +247,8 @@ void CViewGlobals::OnInitialUpdate()
 	OnParamChanged();
 	m_nLockCount = 0;
 
-	// Use tab background color rather than regular dialog background color (required for Aero/etc. where they are not the same color)
-	EnableThemeDialogTexture(m_hWnd, ETDT_ENABLETAB);
+	// The gray application theme supplies this page background.
+	EnableThemeDialogTexture(m_hWnd, ETDT_DISABLE);
 }
 
 

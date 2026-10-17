@@ -259,6 +259,24 @@ BOOL CChildFrame::ChangeViewClass(CRuntimeClass* pViewClass, CCreateContext* pCo
 	CMainFrame *pMainFrm = CMainFrame::GetMainFrame();
 	CWnd *pWnd;
 	if (pViewClass->m_lpszClassName == m_currentViewClassName) return TRUE;
+	// Defer painting until the replacement is initialized and themed. View
+	// commands remain asynchronous so a view
+	// cannot destroy itself while requesting a different editor.
+	struct RedrawGuard
+	{
+		CWnd &window;
+		bool visible;
+		explicit RedrawGuard(CWnd &wnd) : window(wnd), visible((wnd.GetStyle() & WS_VISIBLE) != 0)
+		{ if(visible) window.SetRedraw(FALSE); }
+		~RedrawGuard()
+		{
+			if(visible && ::IsWindow(window.m_hWnd))
+			{
+				window.SetRedraw(TRUE);
+				window.RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+			}
+		}
+	} redraw(m_wndSplitter);
 	if(!m_currentViewClassName.empty())
 	{
 		m_currentViewClassName.clear();
@@ -276,6 +294,9 @@ BOOL CChildFrame::ChangeViewClass(CRuntimeClass* pViewClass, CCreateContext* pCo
 	// Get 2nd window handle
 	if ((pWnd = m_wndSplitter.GetPane(1, 0)) != NULL) m_hWndView = pWnd->m_hWnd;
 	m_currentViewClassName = pViewClass->m_lpszClassName;
+	// Apply to dynamically created controls before the first visible paint, rather
+	// than waiting for the periodic idle scan to discover the new view.
+	SynMPTTheme::RegisterWindow(m_wndSplitter.m_hWnd);
 	m_wndSplitter.RecalcLayout();
 	if ((m_hWndView) && (m_hWndCtrl))
 	{
@@ -406,7 +427,9 @@ void CChildFrame::OnDestroy()
 LRESULT CChildFrame::OnChangeViewClass(WPARAM wParam, LPARAM lParam)
 {
 	CModControlDlg *pDlg = (CModControlDlg *)lParam;
-	if (pDlg)
+	const auto *control = GetModControlView();
+	// A faster subsequent tab click supersedes this queued request.
+	if(pDlg && control && pDlg == control->GetCurrentControlDlg())
 	{
 		CRuntimeClass *pNewViewClass = pDlg->GetAssociatedViewClass();
 		if (pNewViewClass) ChangeViewClass(pNewViewClass);

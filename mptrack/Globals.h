@@ -51,7 +51,7 @@ public:
 	~CModControlDlg() override;
 	
 public:
-	void SetViewWnd(HWND hwndView) { m_hWndView = hwndView; }
+	void SetViewWnd(HWND hwndView);
 	HWND GetViewWnd() const { return m_hWndView; }
 	LRESULT SendViewMessage(UINT uMsg, LPARAM lParam = 0) const;
 	BOOL PostViewMessage(UINT uMsg, LPARAM lParam = 0) const;
@@ -163,6 +163,7 @@ protected:
 
 protected:
 	//{{AFX_MSG(CModControlView)
+	afx_msg BOOL OnEraseBkgnd(CDC *dc);
 	afx_msg void OnSetFocus(CWnd *pOldWnd);
 	afx_msg void OnSize(UINT nType, int cx, int cy);
 	afx_msg LRESULT OnDPIChangedAfterParent(WPARAM = 0, LPARAM = 0);
@@ -231,6 +232,7 @@ public:
 protected:
 	//{{AFX_MSG(CModScrollView)
 	afx_msg void OnDestroy();
+	afx_msg BOOL OnEraseBkgnd(CDC *dc);
 	afx_msg void OnSetFocus(CWnd *pOldWnd);
 	afx_msg LRESULT OnReceiveModViewMsg(WPARAM wParam, LPARAM lParam);
 	afx_msg BOOL OnMouseWheel(UINT fFlags, short zDelta, CPoint point);

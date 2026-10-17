@@ -331,7 +331,7 @@ public:
 	std::vector<mpt::PathString> m_fileNames;
 	bool m_noDls = false, m_noPlugins = false, m_noAssembly = false, m_noSysCheck = false, m_noWine = false,
 		m_portable = false, m_noCrashHandler = false, m_debugCrashHandler = false, m_sharedInstance = false,
-		m_autoPlay = false, m_synmptChecks = false;
+		m_autoPlay = false, m_synmptChecks = false, m_synmptEditorChecks = false;
 #ifdef ENABLE_TESTS
 	bool m_noTests = false;
 #endif
@@ -349,6 +349,7 @@ public:
 		if(isFlag)
 		{
 			if(!lstrcmpi(param, _T("synmptChecks"))) { m_synmptChecks = true; return; }
+			if(!lstrcmpi(param, _T("synmptEditorChecks"))) { m_synmptEditorChecks = true; m_noDls = m_noPlugins = m_noSysCheck = true; return; }
 			if(!lstrcmpi(param, _T("nologo"))) { m_bShowSplash = FALSE; return; }
 			if(!lstrcmpi(param, _T("nodls"))) { m_noDls = true; return; }
 			if(!lstrcmpi(param, _T("noplugs"))) { m_noPlugins = true; return; }
@@ -1439,12 +1440,12 @@ BOOL CTrackApp::InitInstanceImpl(CMPTCommandLineInfo &cmdInfo)
 		ExceptionHandler::ConfigureSystemHandler();
 	}
 
-	if(TrackerSettings::Instance().MiscUseSingleInstance && IPCWindow::SendToIPC(cmdInfo.m_fileNames, cmdInfo.m_autoPlay))
+	if(!cmdInfo.m_synmptEditorChecks && TrackerSettings::Instance().MiscUseSingleInstance && IPCWindow::SendToIPC(cmdInfo.m_fileNames, cmdInfo.m_autoPlay))
 	{
 		ExitProcess(0);
 	}
 
-	IPCWindow::Open(m_hInstance);
+	if(!cmdInfo.m_synmptEditorChecks) IPCWindow::Open(m_hInstance);
 
 	m_pSongSettingsIniFile = std::make_unique<IniFileSettingsBackend>(GetConfigPath() + P_("SongSettings.ini"));
 	m_pSongSettings = std::make_unique<SettingsContainer>(m_pSongSettingsIniFile.get());
@@ -1619,6 +1620,11 @@ BOOL CTrackApp::InitInstanceImpl(CMPTCommandLineInfo &cmdInfo)
 	}
 
 	pMainFrame->UpdateDocumentCount();
+	if(cmdInfo.m_synmptEditorChecks)
+	{
+		const int result = SynMPTChecks::RunEditorSwitches(*pMainFrame, GetInstallBinArchPath());
+		::ExitProcess(static_cast<UINT>(result));
+	}
 	pMainFrame->ShowWindow(m_nCmdShow);
 	pMainFrame->UpdateWindow();
 
@@ -3245,7 +3251,7 @@ void PaintButton(HWND window, HDC dc)
 
 
 constexpr UINT_PTR ScrollPaintTimer = 0x53594E53;
-struct ScrollAppearance { SCROLLBARINFO bars[2]{}; HWND surfaces[3]{}; };
+struct ScrollAppearance { SCROLLBARINFO bars[2]{}; HWND surfaces[3]{}; bool hot[2]{}; bool updating = false; };
 std::map<HWND, ScrollAppearance> scrollAppearances;
 
 bool ScrollInfo(HWND window, LONG object, SCROLLBARINFO &info)
@@ -3305,7 +3311,7 @@ void PaintScrollBars(HWND window)
     {
         const auto found = scrollAppearances.find(window);
         if(found != scrollAppearances.end()) for(auto surface : found->second.surfaces)
-            if(::IsWindow(surface)) ::ShowWindow(surface, SW_HIDE);
+            if(::IsWindow(surface) && (::GetWindowLongPtr(surface, GWL_STYLE) & WS_VISIBLE)) ::ShowWindow(surface, SW_HIDE);
         return;
     }
     // An opaque sibling surface clips native NC redraws, so they cannot replace the skin.
@@ -3318,8 +3324,12 @@ void PaintScrollBars(HWND window)
             return ::RegisterClassW(&type);
         }();
         if(!surfaceClass) return;
-        ::SetWindowLongPtr(window, GWL_STYLE, style | WS_CLIPSIBLINGS);
         auto &appearance = scrollAppearances[window];
+        if(appearance.updating) return;
+        appearance.updating = true;
+        if(!(style & WS_CLIPSIBLINGS)) ::SetWindowLongPtr(window, GWL_STYLE, style | WS_CLIPSIBLINGS);
+        const auto previousBars = std::array{appearance.bars[0], appearance.bars[1]};
+        POINT pointer{}; ::GetCursorPos(&pointer);
         bool visible[3]{}; RECT positions[3]{};
         for(int axis = 0; axis < 2; axis++)
         {
@@ -3335,17 +3345,33 @@ void PaintScrollBars(HWND window)
         for(int axis = 0; axis < 3; axis++)
         {
             auto &surface = appearance.surfaces[axis];
-            if(!visible[axis]) { if(::IsWindow(surface)) ::ShowWindow(surface, SW_HIDE); continue; }
+            if(!visible[axis])
+            {
+                if(::IsWindow(surface) && (::GetWindowLongPtr(surface, GWL_STYLE) & WS_VISIBLE)) ::ShowWindow(surface, SW_HIDE);
+                continue;
+            }
             if(!::IsWindow(surface)) surface = ::CreateWindowExW(WS_EX_NOPARENTNOTIFY, ScrollSurfaceClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
                 0,0,0,0,parent,reinterpret_cast<HMENU>(static_cast<INT_PTR>(ScrollSurfaceID + axis)),AfxGetInstanceHandle(),window);
             if(!surface) continue;
             auto rect = positions[axis]; ::MapWindowPoints(nullptr, parent, reinterpret_cast<POINT *>(&rect), 2);
             RECT previous{}; ::GetWindowRect(surface, &previous); ::MapWindowPoints(nullptr, parent, reinterpret_cast<POINT *>(&previous), 2);
             const bool moved = !::EqualRect(&rect, &previous);
-            ::SetWindowPos(surface, HWND_TOP, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW | (moved ? 0 : SWP_NOMOVE | SWP_NOSIZE));
-            ::RedrawWindow(surface, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+            const bool shown = (::GetWindowLongPtr(surface, GWL_STYLE) & WS_VISIBLE) != 0;
+            // Layout only when required. Repeated HWND_TOP/UPDATENOW calls invalidate the
+            // underlying viewport and can keep a tab switch in a synchronous paint cycle.
+            bool aboveOwner = false;
+            for(auto sibling = ::GetWindow(window, GW_HWNDPREV); sibling; sibling = ::GetWindow(sibling, GW_HWNDPREV))
+                if(sibling == surface) { aboveOwner = true; break; }
+            if(moved || !shown || !aboveOwner)
+                ::SetWindowPos(surface, HWND_TOP, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top,
+                    SWP_NOACTIVATE | (aboveOwner ? SWP_NOZORDER : 0) | (shown ? 0 : SWP_SHOWWINDOW) | (moved ? 0 : SWP_NOMOVE | SWP_NOSIZE));
+            const bool hot = axis < 2 && ::PtInRect(&positions[axis], pointer);
+            const bool changed = axis < 2 && (hot != appearance.hot[axis]
+                || std::memcmp(&previousBars[axis], &appearance.bars[axis], sizeof(SCROLLBARINFO)));
+            if(axis < 2) appearance.hot[axis] = hot;
+            if(moved || !shown || changed) ::InvalidateRect(surface, nullptr, FALSE);
         }
+        appearance.updating = false;
         return;
     }
     // Standalone scroll controls have their own client paint procedure already.
@@ -3746,7 +3772,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     {
         auto *permanent = CWnd::FromHandlePermanent(window);
         if(cls == L"#32770" || cls == L"ToolbarWindow32" || cls == L"MDIClient" || cls == L"SysTabControl32"
-            || (permanent && dynamic_cast<CControlBar *>(permanent)))
+            || (permanent && (dynamic_cast<CControlBar *>(permanent) || dynamic_cast<CFormView *>(permanent)
+                || dynamic_cast<CSplitterWnd *>(permanent))))
         { RECT rect{}; ::GetClientRect(window, &rect); ::FillRect(reinterpret_cast<HDC>(wParam), &rect, Brush(COLOR_BTNFACE)); return TRUE; }
     }
     if((message == WM_PAINT || message == WM_PRINTCLIENT) && (cls == L"SysTabControl32" || cls == L"SysHeader32"))
@@ -3883,11 +3910,19 @@ BOOL CALLBACK Apply(HWND window, LPARAM)
 void RegisterWindow(HWND window)
 {
     if(!window) return;
-    if(std::find(roots.begin(), roots.end(), window) == roots.end()) roots.push_back(window);
+    // A page is already covered by its registered ancestor. Do not rescan every
+    // cached page subtree again on idle as more editor tabs are opened.
+    if(std::none_of(roots.begin(), roots.end(), [window](HWND root) { return root == window || ::IsChild(root, window); }))
+    {
+        roots.erase(std::remove_if(roots.begin(), roots.end(), [window](HWND root) { return ::IsChild(window, root) != FALSE; }), roots.end());
+        roots.push_back(window);
+    }
     // Custom chrome also owns the frame's visual styles, including MDI menu buttons.
     // Disable the native theme before attaching our paint subclass.
-    if((::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION)::SetWindowTheme(window,L"",L"");
+    const bool captioned = (::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION;
+    if(captioned)::SetWindowTheme(window,L"",L"");
     Apply(window, 0); ::EnumChildWindows(window, Apply, 0);
+    if(!captioned) return;
     StyleMenu(::GetMenu(window), true);
     ::DrawMenuBar(window);
     // Documented DWM attribute; older Windows versions simply ignore the request.

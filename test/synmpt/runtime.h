@@ -11,6 +11,7 @@
 #include <sstream>
 #include <cmath>
 #include "hover_chrome.h"
+#include "tab_switching.h"
 
 OPENMPT_NAMESPACE_BEGIN
 namespace SynMPTChecks {
@@ -126,6 +127,20 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
                 ::SendMessage(surface,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT);::GdiFlush();
                 check(::GetPixel(dc,0,0)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"scroll surface paints its dark gutter");
             }
+            ScrollRedrawProbe redraw;
+            constexpr UINT_PTR redrawProbeID = 0x53524348;
+            ::SetWindowSubclass(source, ScrollRedrawProbe::Proc, redrawProbeID, reinterpret_cast<DWORD_PTR>(&redraw));
+            for(auto surface : search.surfaces)
+                ::SetWindowSubclass(surface, ScrollRedrawProbe::Proc, redrawProbeID, reinterpret_cast<DWORD_PTR>(&redraw));
+            for(int repeat = 0; repeat < 32; repeat++)
+            {
+                ::SendMessage(source, WM_SIZE, 0, MAKELPARAM(200, 70));
+                ::SendMessage(source, WM_NCACTIVATE, TRUE, 0);
+            }
+            check(redraw.positions == 0 && redraw.styles == 0, "unchanged viewport redraws must not reposition scrollbar surfaces or rewrite window styles");
+            log << "PASS: 64 unchanged viewport redraw/layout requests cause zero scrollbar repositionings and zero style rewrites\n";
+            ::RemoveWindowSubclass(source, ScrollRedrawProbe::Proc, redrawProbeID);
+            for(auto surface : search.surfaces) ::RemoveWindowSubclass(surface, ScrollRedrawProbe::Proc, redrawProbeID);
             // Native activation/range updates keep the same surfaces and full 32-bit positions.
             for(int position:{123456,800000})
             {
