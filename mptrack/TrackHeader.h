@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #pragma once
 #include "../common/mptBaseTypes.h"
+#include "../soundlib/TrackRouting.h"
 #include <algorithm>
 #include <limits>
 #include <vector>
@@ -10,11 +11,40 @@ OPENMPT_NAMESPACE_BEGIN
 // Use the rounded row sizes for every boundary, including meters and plugins.
 struct TrackHeaderLayout
 {
-    int nameHeight, rowHeight;
+    int nameHeight, rowHeight, ownershipStep, cornerSize;
     explicit constexpr TrackHeaderLayout(int dpi)
-        : nameHeight((20 * dpi + 48) / 96), rowHeight((18 * dpi + 48) / 96) { }
+        : nameHeight((20 * dpi + 48) / 96), rowHeight((18 * dpi + 48) / 96),
+          ownershipStep((10 * dpi + 48) / 96), cornerSize((8 * dpi + 48) / 96) { }
+    // Keep deep folders compact; the parent-color guide still identifies their owner.
+    constexpr int TrackTop(size_t depth) const { return static_cast<int>(std::min<size_t>(depth, 3)) * ownershipStep; }
     constexpr int ControlsBottom() const { return nameHeight + rowHeight * 4; }
 };
+
+// The same outline governs painting and hit testing, including the empty clipped ear.
+struct TrackOutline
+{
+    int left, top, right, bottom, corner;
+    bool Contains(int x, int y) const
+    {
+        return x >= left && x < right && y >= top && y < bottom
+            && (corner == 0 || x - (right - 1 - corner) <= y - top);
+    }
+};
+
+inline size_t TrackOwnershipDepth(const std::vector<ModChannelSettings> &tracks, CHANNELINDEX channel)
+{
+    size_t depth = 0;
+    return VisitTrackBuses(tracks, channel, [&](CHANNELINDEX) { depth++; }) ? depth : 0;
+}
+
+// Folder headers have their own cap; siblings share a square top until their last member.
+inline bool TrackEndsOwnedRun(const std::vector<ModChannelSettings> &tracks, CHANNELINDEX channel, CHANNELINDEX nextVisible)
+{
+    if(channel >= tracks.size()) return false;
+    const auto &track = tracks[channel];
+    if(track.isBus || track.parentBus >= tracks.size() || !tracks[track.parentBus].isBus) return true;
+    return !TrackBelongsToBus(tracks, nextVisible, track.parentBus);
+}
 
 class TrackHeaderSelection
 {

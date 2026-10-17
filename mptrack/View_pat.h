@@ -286,7 +286,12 @@ public:
 	CRect GetTrackSliderRect(CHANNELINDEX channel, DragItem::DragType type) const;
 	bool CanEditTrackControl(DragItem::DragType type) const;
 	bool IsTrackSolo(CHANNELINDEX channel) const;
-	int GetTrackHeaderHeight() const { return TrackHeaderLayout(m_dpi).ControlsBottom(); }
+    int GetTrackHeaderTop(CHANNELINDEX channel) const;
+    int GetTrackControlsBottom(CHANNELINDEX channel) const;
+    int GetTrackHeaderHeight() const;
+    CRect GetTrackPluginRect(CHANNELINDEX channel) const;
+    TrackOutline GetTrackOutline(CHANNELINDEX channel, int bottom) const;
+    TrackOutline GetAutomationOutline(CHANNELINDEX channel, AutomationLane lane, int bottom) const;
 	void SelectTrackHeader(CHANNELINDEX channel, UINT flags);
 	void OnMuteTrackSelection(CHANNELINDEX channel);
 	void OnSoloTrackSelection(CHANNELINDEX channel);

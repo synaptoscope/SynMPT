@@ -30,6 +30,29 @@
 OPENMPT_NAMESPACE_BEGIN
 
 
+// Clip controls to their ownership silhouette, leaving the stepped gutter empty.
+static int ClipTrackOutline(HDC dc, const TrackOutline &shape)
+{
+    const int saved = ::SaveDC(dc);
+    const POINT points[] = {{shape.left, shape.top}, {shape.right - shape.corner, shape.top},
+        {shape.right, shape.top + shape.corner}, {shape.right, shape.bottom}, {shape.left, shape.bottom}};
+    const auto region = ::CreatePolygonRgn(points, static_cast<int>(std::size(points)), WINDING);
+    ::ExtSelectClipRgn(dc, region, RGN_AND);
+    ::DeleteObject(region);
+    return saved;
+}
+
+static void DrawTrackOutline(HDC dc, const TrackOutline &shape, COLORREF color)
+{
+    const auto oldPen = ::SelectObject(dc, GetStockObject(DC_PEN));
+    const auto oldColor = ::SetDCPenColor(dc, color);
+    const POINT points[] = {{shape.left, shape.bottom - 1}, {shape.left, shape.top},
+        {shape.right - 1 - shape.corner, shape.top}, {shape.right - 1, shape.top + shape.corner},
+        {shape.right - 1, shape.bottom - 1}, {shape.left, shape.bottom - 1}};
+    ::Polyline(dc, points, static_cast<int>(std::size(points)));
+    ::SetDCPenColor(dc, oldColor); ::SelectObject(dc, oldPen);
+}
+
 // Headers
 enum
 {
@@ -121,7 +144,7 @@ void CViewPattern::UpdateVisibileColumns(std::bitset<PatternCursor::numColumns> 
 bool CViewPattern::UpdateSizes()
 {
 	const PATTERNFONT *pfnt = PatternFont::currentFont;
-	int oldx = m_szCell.cx, oldy = m_szCell.cy;
+	int oldx = m_szCell.cx, oldy = m_szCell.cy, oldHeaderHeight = m_szHeader.cy;
 	m_szHeader.cx = ROWHDR_WIDTH;
 	m_szHeader.cy = GetTrackHeaderHeight();
 	m_szPluginHeader.cx = 0;
@@ -148,7 +171,7 @@ bool CViewPattern::UpdateSizes()
 		CreateVUMeterBitmap();
 	}
 
-	return (oldx != m_szCell.cx || oldy != m_szCell.cy);
+	return (oldx != m_szCell.cx || oldy != m_szCell.cy || oldHeaderHeight != m_szHeader.cy);
 }
 
 
@@ -634,14 +657,20 @@ void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
 			const COLORREF background = pan ? RGB(247,238,224) : RGB(230,242,232);
 			if(headers)
 			{
-				rect.bottom = m_szHeader.cy;
-				::SetDCBrushColor(dc, background); ::FillRect(dc, rect, GetStockBrush(DC_BRUSH));
-				const auto owner = file->ChnSettings[channel].color;
-				::SetDCPenColor(dc, owner == ModChannelSettings::INVALID_COLOR ? GetSysColor(COLOR_BTNSHADOW) : owner);
-				const int top = MulDiv(TrackNameHeight, m_dpi, 96);
-				::MoveToEx(dc, rect.left, top, nullptr); ::LineTo(dc, rect.right - 1, top);
-				rect.top = std::max(0, static_cast<int>(m_szHeader.cy) - MulDiv(22, m_dpi, 96));
-				DrawButtonRect(dc, lineWidth, rect, pan ? "Pan <" : "Volume <");
+                rect.bottom = m_szHeader.cy;
+                const auto shape = GetAutomationOutline(channel, lane, rect.bottom);
+                const int saved = ClipTrackOutline(dc, shape);
+                ::SetDCBrushColor(dc, background); ::FillRect(dc, rect, GetStockBrush(DC_BRUSH));
+                rect.bottom = rect.top + TrackHeaderLayout(m_dpi).nameHeight;
+                // The label is at the top of the lower automation step, beside its owner.
+                DrawButtonRect(dc, lineWidth, rect, "");
+                rect.DeflateRect(lineWidth * 2, lineWidth);
+                rect.right -= shape.corner;
+                const auto font = ::SelectObject(dc, CMainFrame::GetGUIFont());
+                ::SetTextColor(dc, GetSysColor(COLOR_BTNTEXT)); ::SetBkMode(dc, TRANSPARENT);
+                ::DrawTextA(dc, pan ? "Pan <" : "Vol <", -1, rect, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+                ::SelectObject(dc, font); ::RestoreDC(dc, saved);
+                DrawTrackOutline(dc, shape, GetSysColor(COLOR_BTNSHADOW));
 				continue;
 			}
 			rect.top = m_szHeader.cy;
@@ -721,7 +750,11 @@ void CViewPattern::OnDraw(CDC *pDC)
 	const CModDoc *pModDoc;
 
 	MPT_ASSERT(pDC);
-	UpdateSizes();
+    if(UpdateSizes())
+    {
+        UpdateScrollSize();
+        InvalidatePattern(true, true);
+    }
 	if ((pModDoc = GetDocument()) == nullptr)
 		return;
 	m_chnState.resize(pModDoc->GetNumChannels());
@@ -889,9 +922,24 @@ void CViewPattern::OnDraw(CDC *pDC)
 	}
 
 	DrawAutomationLanes(hdc, false, lineWidth);
+    // Carry each outline down to the common end of the visible pattern.
+    const auto borderPen = ::SelectObject(hdc, GetStockObject(DC_PEN));
+    const auto borderColor = ::SetDCPenColor(hdc, GetSysColor(COLOR_BTNSHADOW));
+    for(CHANNELINDEX channel = xofs; channel < numChannels; channel++)
+    {
+        if(!IsTrackVisible(channel)) continue;
+        const auto shape = GetTrackOutline(channel, GetAutomationRect(channel, AutomationLane::Pan).bottom);
+        if(shape.left >= rcClient.right) break;
+        ::MoveToEx(hdc, shape.left, m_szHeader.cy, nullptr); ::LineTo(hdc, shape.left, shape.bottom - 1);
+        ::MoveToEx(hdc, shape.right - 1, m_szHeader.cy, nullptr); ::LineTo(hdc, shape.right - 1, shape.bottom - 1);
+        ::MoveToEx(hdc, shape.left, shape.bottom - 1, nullptr); ::LineTo(hdc, shape.right, shape.bottom - 1);
+    }
+    ::SetDCPenColor(hdc, borderColor); ::SelectObject(hdc, borderPen);
 	rect.SetRect(0, rcClient.top, rcClient.right, rcClient.top + m_szHeader.cy);
 	if(pDC->RectVisible(rect))
 	{
+        // Clear old caps as folders collapse, reorder or change depth.
+        ::FillRect(m_offScreenDC, rect, GetSysColorBrush(COLOR_APPWORKSPACE));
 		sprintf(s, "#%u", m_nPattern);
 		rect.right = m_szHeader.cx;
 		if(pDC->RectVisible(rect))
@@ -923,6 +971,9 @@ void CViewPattern::OnDraw(CDC *pDC)
 				else if(numVisibleColums < 5)
 					pszfmt = sndFile.m_bChannelMuteTogglePending[chn] ? "[Chn %u]" : "Chn %u";
 				sprintf(s, pszfmt, chn + 1, channel.szName.buf);
+                rect.top = GetTrackHeaderTop(static_cast<CHANNELINDEX>(chn));
+                const auto shape = GetTrackOutline(static_cast<CHANNELINDEX>(chn), m_szHeader.cy);
+                const int shapeClip = ClipTrackOutline(m_offScreenDC, shape);
 				DrawButtonRect(m_offScreenDC, lineWidth, rect, "");
 				auto nameRect = GetTrackControlRect(static_cast<CHANNELINDEX>(chn), DragItem::ChannelHeader);
                 const auto fullNameRect = nameRect;
@@ -933,10 +984,18 @@ void CViewPattern::OnDraw(CDC *pDC)
                     DrawButtonRect(m_offScreenDC, lineWidth, toggle, m_chnState[chn].folderCollapsed ? ">" : "v");
                     nameRect.left = toggle.right;
                 }
-				DrawButtonRect(m_offScreenDC, lineWidth, nameRect, s,
-					channel.dwFlags[CHN_MUTE],
-					(m_bInItemRect && m_nDragItem.Type() == DragItem::ChannelHeader && m_nDragItem.Value() == chn) || m_trackSelection.Contains(chn),
-					DT_CENTER, chanColorHeight);
+                const bool pushed = (m_bInItemRect && m_nDragItem.Type() == DragItem::ChannelHeader && m_nDragItem.Value() == chn) || m_trackSelection.Contains(chn);
+                DrawButtonRect(m_offScreenDC, lineWidth, nameRect, "", channel.dwFlags[CHN_MUTE], pushed);
+                auto label = nameRect;
+                label.DeflateRect(lineWidth * 2, lineWidth);
+                label.right -= shape.corner;
+                label.top += chanColorHeight;
+                if(pushed) label.OffsetRect(lineWidth, lineWidth);
+                const auto nameFont = ::SelectObject(m_offScreenDC, CMainFrame::GetGUIFont());
+                ::SetTextColor(m_offScreenDC, GetSysColor(channel.dwFlags[CHN_MUTE] ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
+                ::SetBkMode(m_offScreenDC, TRANSPARENT);
+                ::DrawTextA(m_offScreenDC, s, -1, label, DT_SINGLELINE | DT_NOPREFIX | DT_CENTER | DT_END_ELLIPSIS);
+                ::SelectObject(m_offScreenDC, nameFont);
 
 				if(channel.color != ModChannelSettings::INVALID_COLOR)
 				{
@@ -985,10 +1044,10 @@ void CViewPattern::OnDraw(CDC *pDC)
                 {
                     const auto color = sndFile.ChnSettings[channel.parentBus].color;
                     ::SetDCBrushColor(m_offScreenDC, color == ModChannelSettings::INVALID_COLOR ? GetSysColor(COLOR_HIGHLIGHT) : color);
-                    CRect familyEdge(rect.left, nameRect.bottom, rect.left + lineWidth * 2, GetTrackHeaderHeight());
+                    CRect familyEdge(rect.left, nameRect.bottom, rect.left + lineWidth * 2, GetTrackControlsBottom(static_cast<CHANNELINDEX>(chn)));
                     ::FillRect(m_offScreenDC, familyEdge, dcBrush);
                 }
-				rect.top = rect.bottom = GetTrackHeaderHeight();
+				rect.top = rect.bottom = GetTrackControlsBottom(static_cast<CHANNELINDEX>(chn));
 				if(m_Status[psShowVUMeters])
 				{
 					m_chnState[chn].vuMeterOld = 0;
@@ -1006,6 +1065,8 @@ void CViewPattern::OnDraw(CDC *pDC)
 					DrawButtonRect(m_offScreenDC, lineWidth, rect, s, channel.dwFlags[CHN_NOFX],
 						m_bInItemRect && (m_nDragItem.Type() == DragItem::PluginName) && (m_nDragItem.Value() == chn), DT_CENTER);
 				}
+                ::RestoreDC(m_offScreenDC, shapeClip);
+                DrawTrackOutline(m_offScreenDC, shape, GetSysColor(COLOR_BTNSHADOW));
 			} else
 			{
 				break;
@@ -2099,13 +2160,12 @@ void CViewPattern::UpdateAllVUMeters(Notification *pnotify)
 	int x = m_szHeader.cx;
 	CHANNELINDEX nChn = static_cast<CHANNELINDEX>(xofs);
 	const CHANNELINDEX numChannels = std::min(pModDoc->GetNumChannels(), static_cast<CHANNELINDEX>(m_chnState.size()));
-	const int yPos = GetTrackHeaderHeight();
 	while(nChn < numChannels && x < rcClient.right)
 	{
 		m_chnState[nChn].vuMeter = static_cast<uint16>(pnotify->pos[nChn]);
 		if(!isPlaying || pnotify->type[Notification::Stop])
 			m_chnState[nChn].vuMeter = 0;
-		if(IsTrackVisible(nChn)) DrawChannelVUMeter(hdc, x, rcClient.top + yPos, nChn);
+		if(IsTrackVisible(nChn)) DrawChannelVUMeter(hdc, x, rcClient.top + GetTrackControlsBottom(nChn), nChn);
 		nChn++;
 		x += GetTrackWidth(static_cast<CHANNELINDEX>(nChn - 1));
 	}

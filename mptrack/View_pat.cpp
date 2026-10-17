@@ -542,6 +542,51 @@ bool CViewPattern::UpdateScrollbarPositions(bool updateHorizontalScrollbar)
 	return true;
 }
 
+int CViewPattern::GetTrackHeaderTop(CHANNELINDEX channel) const
+{
+    const auto *file = GetSoundFile();
+    return TrackHeaderLayout(m_dpi).TrackTop(file ? TrackOwnershipDepth(file->ChnSettings, channel) : 0);
+}
+
+int CViewPattern::GetTrackControlsBottom(CHANNELINDEX channel) const
+{
+    return GetTrackHeaderTop(channel) + TrackHeaderLayout(m_dpi).ControlsBottom();
+}
+
+int CViewPattern::GetTrackHeaderHeight() const
+{
+    int top = 0;
+    if(const auto *file = GetSoundFile())
+        for(CHANNELINDEX channel = 0; channel < file->GetNumChannels(); channel++)
+            if(IsTrackVisible(channel)) top = std::max(top, GetTrackHeaderTop(channel));
+    return top + TrackHeaderLayout(m_dpi).ControlsBottom();
+}
+
+CRect CViewPattern::GetTrackPluginRect(CHANNELINDEX channel) const
+{
+    const int left = GetTrackLeft(channel);
+    const int top = GetTrackControlsBottom(channel) + (m_Status[psShowVUMeters] ? MulDiv(13, m_dpi, 96) : 0);
+    return CRect(left, top, left + GetNoteTrackWidth(channel), top + m_szPluginHeader.cy);
+}
+
+TrackOutline CViewPattern::GetTrackOutline(CHANNELINDEX channel, int bottom) const
+{
+    const auto *file = GetSoundFile();
+    auto next = static_cast<CHANNELINDEX>(channel + 1);
+    if(file) while(next < file->GetNumChannels() && !IsTrackVisible(next)) next++;
+    const int left = GetTrackLeft(channel), width = GetNoteTrackWidth(channel);
+    const auto layout = TrackHeaderLayout(m_dpi);
+    const int corner = file && TrackEndsOwnedRun(file->ChnSettings, channel, next) ? std::min(layout.cornerSize, width / 3) : 0;
+    return {left, GetTrackHeaderTop(channel), left + width, bottom, corner};
+}
+
+TrackOutline CViewPattern::GetAutomationOutline(CHANNELINDEX channel, AutomationLane lane, int bottom) const
+{
+    const auto rect = GetAutomationRect(channel, lane);
+    const bool last = lane == AutomationLane::Volume || GetAutomationWidth(channel, AutomationLane::Volume) == 0;
+    return {static_cast<int>(rect.left), static_cast<int>(rect.top), static_cast<int>(rect.right), bottom, last ? std::min(TrackHeaderLayout(m_dpi).cornerSize, static_cast<int>(rect.Width()) / 3) : 0};
+}
+
 CRect CViewPattern::GetTrackControlRect(CHANNELINDEX channel, DragItem::DragType type) const
 {
 	const int left = GetTrackLeft(channel), width = GetNoteTrackWidth(channel);
@@ -564,6 +609,8 @@ CRect CViewPattern::GetTrackControlRect(CHANNELINDEX channel, DragItem::DragType
 	case DragItem::ChannelResize: rect.left = rect.right - MulDiv(4, m_dpi, 96); rect.bottom = m_szHeader.cy; break;
 	default: break;
 	}
+    rect.OffsetRect(0, GetTrackHeaderTop(channel));
+    if(type == DragItem::ChannelResize) rect.bottom = m_szHeader.cy;
 	if(type == DragItem::VolumeLaneToggle || type == DragItem::PanLaneToggle) rect.left = rect.right - MulDiv(12, m_dpi, 96);
 	return rect;
 }
@@ -666,7 +713,7 @@ DragItem CViewPattern::GetDragItem(CPoint point, RECT &outRect) const
 		for(auto lane : {AutomationLane::Pan, AutomationLane::Volume})
 		{
 			auto rect = GetAutomationRect(channel, lane);
-			if(rect.Width() > 0 && rect.PtInRect(point))
+			if(rect.Width() > 0 && GetAutomationOutline(channel, lane, rect.bottom).Contains(point.x, point.y))
 			{
 				outRect = rect;
 				if(point.y < m_szHeader.cy)
@@ -674,10 +721,10 @@ DragItem CViewPattern::GetDragItem(CPoint point, RECT &outRect) const
 				return {lane == AutomationLane::Pan ? DragItem::PanLane : DragItem::VolumeLane, channel};
 			}
 		}
-		const int left = GetTrackLeft(channel);
+        if(!GetTrackOutline(channel, m_szHeader.cy).Contains(point.x, point.y)) continue;
 		if(m_Status[psShowPluginNames])
 		{
-			CRect rect(left, m_szHeader.cy - m_szPluginHeader.cy, left + GetNoteTrackWidth(channel), m_szHeader.cy);
+            const auto rect = GetTrackPluginRect(channel);
 			if(rect.PtInRect(point)) { outRect = rect; return {DragItem::PluginName, channel}; }
 		}
 		for(auto type : {DragItem::ChannelResize, DragItem::FolderToggle, DragItem::ChannelMute, DragItem::ChannelSolo, DragItem::ChannelRecord, DragItem::ChannelInstrument, DragItem::ChannelRouting, DragItem::PanLaneToggle, DragItem::VolumeLaneToggle, DragItem::ChannelVolume, DragItem::ChannelPan, DragItem::ChannelHeader})
@@ -863,16 +910,15 @@ BOOL CViewPattern::PreTranslateMessage(MSG *pMsg)
 		{
 			// Open quick channel properties dialog if we're middle-clicking a channel header.
 			CPoint point(GET_X_LPARAM(pMsg->lParam), GET_Y_LPARAM(pMsg->lParam));
-			if(point.y < m_szHeader.cy - m_szPluginHeader.cy)
-			{
-				PatternCursor cursor = GetPositionFromPoint(point);
-				if(cursor.GetChannel() < GetDocument()->GetNumChannels())
-				{
-					ClientToScreen(&point);
-					m_quickChannelProperties.Show(GetDocument(), cursor.GetChannel(), point);
-					return true;
-				}
-			}
+            RECT hitRect;
+            const auto hit = GetDragItem(point, hitRect);
+            if(hit.IsValid() && hit.Type() != DragItem::PatternHeader && hit.Type() != DragItem::PluginName
+                && hit.Type() != DragItem::PanLane && hit.Type() != DragItem::VolumeLane && point.y < m_szHeader.cy)
+            {
+                ClientToScreen(&point);
+                m_quickChannelProperties.Show(GetDocument(), static_cast<CHANNELINDEX>(hit.Value()), point);
+                return true;
+            }
 		}
 	}
 
@@ -1735,6 +1781,11 @@ void CViewPattern::OnRButtonUp(UINT flags, CPoint pt)
 	// Too far left to get a ctx menu:
 	if(!modDoc || pt.x < m_szHeader.cx)
 		return;
+    if(pt.y < m_szHeader.cy)
+    {
+        RECT hitRect;
+        if(!GetDragItem(pt, hitRect).IsValid()) return;
+    }
 
 	ResetRecordGroupDragging();
 	const CHANNELINDEX sourceChn = static_cast<CHANNELINDEX>(m_nDragItem.Value());
@@ -1796,7 +1847,7 @@ void CViewPattern::OnRButtonUp(UINT flags, CPoint pt)
 		CInputHandler *ih = CMainFrame::GetInputHandler();
 
 		//------ Plugin Header Menu --------- :
-		if(m_Status[psShowPluginNames] && inChannelHeader && (pt.y > m_szHeader.cy - m_szPluginHeader.cy))
+		if(m_Status[psShowPluginNames] && inChannelHeader && GetTrackPluginRect(nChn).PtInRect(pt))
 		{
 			BuildPluginCtxMenu(hMenu, nChn, sndFile);
 		}
@@ -5104,7 +5155,7 @@ LRESULT CViewPattern::OnCustomKeyMsg(WPARAM wParam, LPARAM lParam)
 			{
 				CPoint pt = GetPointFromPosition(m_Cursor);
 				pt.x += GetChannelWidth() / 2;
-				pt.y = (m_szHeader.cy - m_szPluginHeader.cy) / 2;
+				pt.y = GetTrackControlRect(GetCurrentChannel(), DragItem::ChannelHeader).CenterPoint().y;
 				OnRButtonUp(0, pt);
 			}
 			return wParam;
@@ -5112,7 +5163,7 @@ LRESULT CViewPattern::OnCustomKeyMsg(WPARAM wParam, LPARAM lParam)
 			{
 				CPoint pt = GetPointFromPosition(m_Cursor);
 				pt.x += GetChannelWidth() / 2;
-				pt.y = m_szHeader.cy - m_szPluginHeader.cy / 2;
+				pt.y = GetTrackPluginRect(GetCurrentChannel()).CenterPoint().y;
 				OnRButtonUp(0, pt);
 			}
 			return wParam;
@@ -8500,7 +8551,7 @@ void CViewPattern::ToggleTrackFolder(CHANNELINDEX channel)
     m_chnState[channel].folderCollapsed = !m_chnState[channel].folderCollapsed;
     if(!IsTrackVisible(GetCurrentChannel())) m_Cursor.SetColumn(channel, PatternCursor::noteColumn);
     m_trackSelection.Click(channel, file.GetNumChannels(), false, false); SetSelToCursor();
-    UpdateScrollSize(); UpdateScrollPos(); SetCurrentColumn(m_Cursor); InvalidatePattern(true, true);
+    UpdateSizes(); UpdateScrollSize(); UpdateScrollPos(); SetCurrentColumn(m_Cursor); InvalidatePattern(true, true);
 }
 
 void CViewPattern::ArrangeTrackFolders()
@@ -8626,7 +8677,7 @@ CRect CViewPattern::GetAutomationRect(CHANNELINDEX channel, AutomationLane lane)
 	int bottom = client.bottom;
 	if(GetSoundFile() && GetSoundFile()->Patterns.IsValidPat(m_nPattern))
 		bottom = std::min(bottom, static_cast<int>(m_szHeader.cy) + (static_cast<int>(GetSoundFile()->Patterns[m_nPattern].GetNumRows()) - GetYScrollPos() + static_cast<int>(m_nMidRow)) * GetRowHeight() - GetSmoothScrollOffset());
-	return CRect(left, 0, left + GetAutomationWidth(channel, lane), std::max(bottom, static_cast<int>(m_szHeader.cy)));
+	return CRect(left, GetTrackHeaderTop(channel) + TrackHeaderLayout(m_dpi).ownershipStep, left + GetAutomationWidth(channel, lane), std::max(bottom, static_cast<int>(m_szHeader.cy)));
 }
 
 AutomationFormat CViewPattern::GetAutomationFormat() const

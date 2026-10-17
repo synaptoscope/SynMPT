@@ -101,6 +101,27 @@ void RunSynMPTAutomationChecks()
     for(const auto [dpi,panBottom]:std::vector<std::pair<int,int>>{{96,92},{120,117},{144,138},{168,163},{192,184}})
         check(TrackHeaderLayout(dpi).ControlsBottom()==panBottom,"meter/plugin boundary must follow all five header rows at fractional DPI");
 
+    std::vector<ModChannelSettings> family(6);
+    family[0].isBus=true;family[1].parentBus=0;family[2].parentBus=0;
+    family[3].isBus=true;family[3].parentBus=0;family[4].parentBus=3;
+    check(TrackOwnershipDepth(family,0)==0 && TrackOwnershipDepth(family,1)==1 && TrackOwnershipDepth(family,4)==2,"folder, child and nested headers have distinct depths");
+    check(!TrackEndsOwnedRun(family,1,2) && !TrackEndsOwnedRun(family,2,3),"sibling top edges remain square while the owner continues");
+    check(TrackEndsOwnedRun(family,0,1) && TrackEndsOwnedRun(family,3,4),"each parent has its own clipped cap");
+    check(TrackEndsOwnedRun(family,4,5) && TrackEndsOwnedRun(family,2,5),"last child is capped, including when the following nested folder is hidden");
+    check(TrackEndsOwnedRun(family,5,CHANNELINDEX_INVALID),"standalone track ends its own block");
+    for(const int dpi: {96,120,144,168,192})
+    {
+        const TrackHeaderLayout layout(dpi);
+        const int childTop=layout.TrackTop(1), automationTop=childTop+layout.ownershipStep;
+        check(childTop>layout.TrackTop(0) && automationTop>childTop && layout.TrackTop(2)==automationTop,"scaled ownership steps remain ordered");
+        check(layout.TrackTop(100)==layout.TrackTop(3),"deep nesting cannot spread the compact header indefinitely");
+        const TrackOutline outline{30,childTop,130,childTop+layout.ControlsBottom(),layout.cornerSize};
+        check(outline.Contains(30,childTop) && !outline.Contains(129,childTop) && outline.Contains(129,childTop+layout.cornerSize),"clipped cap is visible geometry, not a rectangular click target");
+        check(!outline.Contains(40,childTop-1) && !outline.Contains(130,childTop+50) && !outline.Contains(40,outline.bottom),"gutter and adjacent lane do not trigger track controls");
+    }
+    family[0].parentBus=3;
+    check(TrackOwnershipDepth(family,4)==0,"malformed hierarchy uses a safe flat header");
+
     band[4].compositeInput = true;
     band[0].trackInstrument = 1; band[0].inputEnabled = true;
     band[0].inputNoteMin = NOTE_MIDDLEC; band[0].inputNoteMax = NOTE_MIDDLEC + 11;
@@ -132,7 +153,7 @@ void RunSynMPTAutomationChecks()
     check(TrackHiddenByFolder(band,3,collapsed),"outer folder collapse includes nested folders");
     band[4].parentBus=3;
     check(TrackFolderOrder(band).size()==band.size(),"malformed cyclic hierarchy still has each track exactly once");
-	std::cout << "PASS: native automation storage, shared lanes, note/velocity protection, effect collisions, plugin notes, erase, format mappings, line endpoints, nested buses, solo, gain/pan/mute, cycle protection, multi-select, additive multi-solo, DPI header bounds, composite articulations/layers/pitch/protection and folder hierarchy\n";
+	std::cout << "PASS: native automation storage, shared lanes, note/velocity protection, effect collisions, plugin notes, erase, format mappings, line endpoints, nested buses, solo, gain/pan/mute, cycle protection, multi-select, additive multi-solo, DPI header bounds, ownership caps and hit testing, composite articulations/layers/pitch/protection and folder hierarchy\n";
 }
 OPENMPT_NAMESPACE_END
 #ifdef SYNMPT_AUTOMATION_CHECK_MAIN
