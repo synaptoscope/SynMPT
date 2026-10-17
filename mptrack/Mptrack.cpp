@@ -2967,7 +2967,7 @@ COLORREF Color(int index)
     case COLOR_WINDOW: return RGB(44,47,53);
     case COLOR_BTNFACE: case COLOR_MENU: return RGB(56,59,66);
     case COLOR_APPWORKSPACE: return RGB(35,38,43);
-    case COLOR_ACTIVECAPTION: case COLOR_INACTIVECAPTION: return RGB(48,51,57);
+    case COLOR_ACTIVECAPTION: case COLOR_INACTIVECAPTION: return RGB(35,38,43);
     case COLOR_CAPTIONTEXT: return RGB(226,229,235);
     case COLOR_INACTIVECAPTIONTEXT: return RGB(170,177,188);
     case COLOR_BTNSHADOW: return RGB(31,34,39);
@@ -3074,6 +3074,35 @@ namespace
 std::vector<HWND> roots;
 std::wstring Class(HWND window) { wchar_t name[128]{}; ::GetClassNameW(window, name, 128); return name; }
 constexpr UINT_PTR ThemeSubclassID = 0x53594E54;
+struct CaptionHover { int hit=0; bool tracking=false; };
+std::map<HWND,CaptionHover> captionHover;
+std::map<HWND,bool> comboHover;
+
+// Compose each control/caption before presenting it; no erase-and-text intermediate frame.
+class PaintBuffer
+{
+    HDC target, memory=nullptr;
+    HBITMAP bitmap=nullptr;
+    HGDIOBJ previous=nullptr;
+    CRect bounds;
+public:
+    PaintBuffer(HDC dc, const RECT &rect) : target(dc), bounds(rect)
+    {
+        if(bounds.IsRectEmpty())return;
+        memory=::CreateCompatibleDC(dc);if(!memory)return;
+        bitmap=::CreateCompatibleBitmap(dc,bounds.Width(),bounds.Height());
+        if(!bitmap){::DeleteDC(memory);memory=nullptr;return;}
+        previous=::SelectObject(memory,bitmap);::SetViewportOrgEx(memory,-bounds.left,-bounds.top,nullptr);
+    }
+    HDC DC() const {return memory ? memory : target;}
+    ~PaintBuffer()
+    {
+        if(!memory)return;
+        ::SetViewportOrgEx(memory,0,0,nullptr);
+        ::BitBlt(target,bounds.left,bounds.top,bounds.Width(),bounds.Height(),memory,0,0,SRCCOPY);
+        ::SelectObject(memory,previous);::DeleteObject(bitmap);::DeleteDC(memory);
+    }
+};
 
 void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled);
 struct MenuEntry { HMENU menu; std::wstring text; bool bar, separator, submenu; HBITMAP bitmap = nullptr; };
@@ -3092,9 +3121,11 @@ void StyleMenu(HMENU menu, bool bar)
         if(!::GetMenuItemInfoW(menu, item, TRUE, &info)) continue;
         if(info.hSubMenu) StyleMenu(info.hSubMenu, false);
         auto found = menuEntries.find(info.dwItemData);
-        if((info.fType & MFT_OWNERDRAW) && found == menuEntries.end()) continue;
         const auto bitmapID = reinterpret_cast<UINT_PTR>(info.hbmpItem);
         const bool systemButton = bar && (bitmapID == 2 || bitmapID == 3 || bitmapID == 5 || bitmapID == 6 || bitmapID == 7);
+        // DefFrameProc already marks maximized-document buttons as owner drawn.
+        // Recognize their documented bitmaps while preserving all other custom menu painters.
+        if((info.fType & MFT_OWNERDRAW) && found == menuEntries.end() && !systemButton) continue;
         if(info.hbmpItem && !systemButton) continue;
         MenuEntry *entry = nullptr;
         if(found != menuEntries.end())
@@ -3518,9 +3549,26 @@ void PaintCombo(HWND window,HDC dc)
     ::SetBkMode(dc,TRANSPARENT);::SetTextColor(dc,Color(enabled ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
     CRect item(info.rcItem); item.DeflateRect(3,0);wchar_t text[1024]{};::GetWindowTextW(window,text,1024);
     ::DrawTextW(dc,text,-1,item,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|DT_END_ELLIPSIS);
-    ::FillRect(dc,&info.rcButton,Brush(COLOR_BTNFACE));::DrawTextW(dc,L"\u2304",-1,&info.rcButton,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    ::FillRect(dc,&info.rcButton,Brush(comboHover[window] && enabled ? COLOR_3DLIGHT : COLOR_BTNFACE));
+    ::DrawTextW(dc,L"\u2304",-1,&info.rcButton,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     if(::GetFocus()==window) { item.DeflateRect(0,2);::DrawFocusRect(dc,item); }
     ::RestoreDC(dc,saved);
+}
+
+void PaintComboBuffered(HWND window,HDC target)
+{
+    RECT rect{};::GetClientRect(window,&rect);PaintBuffer buffer(target,rect);PaintCombo(window,buffer.DC());
+}
+
+void UpdateComboHover(HWND window,bool hot)
+{
+    if(comboHover[window]==hot)return;
+    comboHover[window]=hot;
+    COMBOBOXINFO info{};info.cbSize=sizeof(info);if(!::GetComboBoxInfo(window,&info))return;
+    const auto dc=::GetDC(window);if(!dc)return;
+    // Only the arrow changes on hover. The selected instrument text remains untouched.
+    {const int saved=::SaveDC(dc);::IntersectClipRect(dc,info.rcButton.left,info.rcButton.top,info.rcButton.right,info.rcButton.bottom);PaintComboBuffered(window,dc);::RestoreDC(dc,saved);}
+    ::ReleaseDC(window,dc);
 }
 
 void PaintSpinner(HWND window, HDC dc)
@@ -3574,7 +3622,15 @@ void PaintNonClient(HWND window)
     POINT offset{};::ClientToScreen(window,&offset);::OffsetRect(&client,offset.x-screen.left,offset.y-screen.top);
     CRect frame(0,0,screen.right-screen.left,screen.bottom-screen.top);
     const auto dc=::GetWindowDC(window);if(!dc)return;
+    TITLEBARINFOEX title{};title.cbSize=sizeof(title);
+    if(captioned)::SendMessage(window,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
+    CRect captionBounds(title.rcTitleBar);
+    if(captioned)for(int part:{2,3,5})
+        if(!(title.rgstate[part]&(STATE_SYSTEM_INVISIBLE|STATE_SYSTEM_OFFSCREEN)) && !::IsRectEmpty(&title.rgrect[part]))
+            captionBounds.UnionRect(captionBounds,&title.rgrect[part]);
+    captionBounds.OffsetRect(-screen.left,-screen.top);captionBounds.IntersectRect(captionBounds,frame);
     const int saved=::SaveDC(dc);::ExcludeClipRect(dc,client.left,client.top,client.right,client.bottom);
+    if(captioned && !captionBounds.IsRectEmpty())::ExcludeClipRect(dc,captionBounds.left,captionBounds.top,captionBounds.right,captionBounds.bottom);
     // Preserve the menu bar and its owner-drawn entries.
     MENUBARINFO menu{};menu.cbSize=sizeof(menu);
     if(::GetMenuBarInfo(window,OBJID_MENU,0,&menu))
@@ -3583,19 +3639,23 @@ void PaintNonClient(HWND window)
     ::RestoreDC(dc,saved);
     if(captioned)
     {
-        TITLEBARINFOEX title{};title.cbSize=sizeof(title);::SendMessage(window,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
-        CRect caption(title.rcTitleBar);caption.OffsetRect(-screen.left,-screen.top);caption.IntersectRect(caption,frame);
+        CRect caption(captionBounds);
         if(!caption.IsRectEmpty())
         {
-            const int state=::SaveDC(dc);::FillRect(dc,caption,Brush(COLOR_ACTIVECAPTION));
+            PaintBuffer buffer(dc,caption);const auto paintDC=buffer.DC();
+            const int state=::SaveDC(paintDC);
+            ::FillRect(paintDC,caption,Brush(COLOR_ACTIVECAPTION));
+            captionHover[window].hit=0;
             POINT pointer{};::GetCursorPos(&pointer);
             const UINT commands[]{0,0,SC_MINIMIZE,static_cast<UINT>(::IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE),0,SC_CLOSE};
             for(int part : {2,3,5})
             {
                 if(title.rgstate[part] & (STATE_SYSTEM_INVISIBLE|STATE_SYSTEM_OFFSCREEN)) continue;
                 CRect button(title.rgrect[part]);if(button.IsRectEmpty())continue;
-                const bool hot=button.PtInRect(pointer)!=FALSE;button.OffsetRect(-screen.left,-screen.top);
-                DrawCaptionButton(dc,button,commands[part],hot,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0);
+                const bool hot=button.PtInRect(pointer)!=FALSE;
+                if(hot)captionHover[window].hit=part==2 ? HTMINBUTTON : part==3 ? HTMAXBUTTON : HTCLOSE;
+                button.OffsetRect(-screen.left,-screen.top);
+                DrawCaptionButton(paintDC,button,commands[part],hot,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0);
                 caption.right=std::min(caption.right,button.left);
             }
             const int padding=MulDiv(6,HighDPISupport::GetDpiForWindow(window),96);caption.left+=padding;
@@ -3604,23 +3664,68 @@ void PaintNonClient(HWND window)
                 auto icon=reinterpret_cast<HICON>(::SendMessage(window,WM_GETICON,ICON_SMALL,0));
                 if(!icon)icon=reinterpret_cast<HICON>(::GetClassLongPtr(window,GCLP_HICONSM));
                 const int size=MulDiv(16,HighDPISupport::GetDpiForWindow(window),96);
-                if(icon)::DrawIconEx(dc,caption.left,caption.CenterPoint().y-size/2,icon,size,size,0,nullptr,DI_NORMAL);
+                if(icon)::DrawIconEx(paintDC,caption.left,caption.CenterPoint().y-size/2,icon,size,size,0,nullptr,DI_NORMAL);
                 caption.left+=size+padding;
             }
-            ::SelectObject(dc,CMainFrame::GetGUIFont());::SetBkMode(dc,TRANSPARENT);
+            ::SelectObject(paintDC,CMainFrame::GetGUIFont());::SetBkMode(paintDC,TRANSPARENT);
             const bool active=::GetActiveWindow()==window || ::GetAncestor(::GetActiveWindow(),GA_ROOTOWNER)==window;
-            ::SetTextColor(dc,Color(active ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT));
+            ::SetTextColor(paintDC,Color(active ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT));
             wchar_t label[1024]{};::GetWindowTextW(window,label,1024);
-            ::DrawTextW(dc,label,-1,caption,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);::RestoreDC(dc,state);
+            ::DrawTextW(paintDC,label,-1,caption,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);::RestoreDC(paintDC,state);
         }
     }
     ::ReleaseDC(window, dc);
     PaintScrollBars(window);
 }
 
+void UpdateCaptionHover(HWND window,int hit,bool tracking)
+{
+    auto &state=captionHover[window];state.tracking=tracking;
+    if(state.hit==hit)return;
+    const int old=state.hit;state.hit=hit;
+    TITLEBARINFOEX title{};title.cbSize=sizeof(title);::SendMessage(window,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
+    RECT screen{};::GetWindowRect(window,&screen);const auto dc=::GetWindowDC(window);if(!dc)return;
+    for(int part:{2,3,5})
+    {
+        const int buttonHit=part==2 ? HTMINBUTTON : part==3 ? HTMAXBUTTON : HTCLOSE;
+        if((buttonHit!=old && buttonHit!=hit) || (title.rgstate[part]&(STATE_SYSTEM_INVISIBLE|STATE_SYSTEM_OFFSCREEN)))continue;
+        CRect rect(title.rgrect[part]);rect.OffsetRect(-screen.left,-screen.top);if(rect.IsRectEmpty())continue;
+        const UINT command=part==2 ? SC_MINIMIZE : part==5 ? SC_CLOSE : ::IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
+        PaintBuffer buffer(dc,rect);DrawCaptionButton(buffer.DC(),rect,command,buttonHit==hit,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0);
+    }
+    ::ReleaseDC(window,dc);
+}
+
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
 {
     const auto cls = Class(window);
+    const bool captioned=(::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION;
+    if(captioned && message==WM_NCMOUSEMOVE)
+    {
+        const bool title=wParam==HTCAPTION || wParam==HTSYSMENU || wParam==HTMINBUTTON || wParam==HTMAXBUTTON || wParam==HTCLOSE;
+        UpdateCaptionHover(window,(wParam==HTMINBUTTON || wParam==HTMAXBUTTON || wParam==HTCLOSE) ? static_cast<int>(wParam) : 0,title);
+        if(title)
+        {
+            TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE|TME_NONCLIENT,window,0};::TrackMouseEvent(&track);
+            // Our buttons own hover drawing. Native caption painting would switch fonts.
+            return 0;
+        }
+    }
+    if(captioned && message==WM_NCMOUSELEAVE && captionHover[window].tracking)
+    { UpdateCaptionHover(window,0,false);return 0; }
+    if(cls==L"ComboBox" && PlainCombo(window))
+    {
+        if(message==WM_ERASEBKGND)return TRUE;
+        if((message==WM_MOUSEMOVE || message==WM_MOUSELEAVE) && !::SendMessage(window,CB_GETDROPPEDSTATE,0,0))
+        {
+            if(message==WM_MOUSEMOVE){TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,window,0};::TrackMouseEvent(&track);}
+            UpdateComboHover(window,message==WM_MOUSEMOVE);return 0;
+        }
+    }
+    if(captioned && message==WM_NCACTIVATE && !::IsIconic(window))
+    {
+        const auto result=::DefSubclassProc(window,message,wParam,-1);PaintNonClient(window);return result;
+    }
     LRESULT menuResult = 0;
     if(MenuMessage(window, message, wParam, lParam, menuResult)) return menuResult;
     if(message == WM_INITMENU || message == WM_INITMENUPOPUP)
@@ -3662,7 +3767,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 for(int pane=0;pane<bar->GetCount();pane++) bar->SetPaneText(pane,bar->GetPaneText(pane));
         }
         PAINTSTRUCT paint{};const auto dc=message==WM_PAINT ? ::BeginPaint(window,&paint) : reinterpret_cast<HDC>(wParam);
-        if(cls==L"Static")PaintStatic(window,dc);else if(cls==L"ComboBox")PaintCombo(window,dc);
+        if(cls==L"Static")PaintStatic(window,dc);else if(cls==L"ComboBox")PaintComboBuffered(window,dc);
         else if(cls==L"msctls_updown32")PaintSpinner(window,dc);else PaintStatus(window,dc);
         if(message==WM_PAINT)::EndPaint(window,&paint);return 0;
     }
@@ -3724,7 +3829,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     if(message == WM_NCDESTROY)
     {
-        ::KillTimer(window, ScrollPaintTimer); DestroyScrollSurfaces(window);
+        ::KillTimer(window, ScrollPaintTimer); DestroyScrollSurfaces(window);captionHover.erase(window);comboHover.erase(window);
         ::RemoveWindowSubclass(window, WindowProc, ThemeSubclassID);
         return ::DefSubclassProc(window, message, wParam, lParam);
     }
@@ -3743,13 +3848,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         PaintScrollBars(window);
     if((cls==L"msctls_updown32" || (cls==L"ComboBox" && PlainCombo(window)))
         && (message==WM_ENABLE || message==WM_SETFOCUS || message==WM_KILLFOCUS || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP
-            || message==WM_TIMER || message==WM_MOUSEMOVE || message==WM_MOUSELEAVE || message==CB_SETCURSEL))
+            || message==WM_TIMER || (cls==L"msctls_updown32" && (message==WM_MOUSEMOVE || message==WM_MOUSELEAVE)) || message==CB_SETCURSEL))
     {
-        const auto dc=::GetDC(window);if(cls==L"ComboBox")PaintCombo(window,dc);else PaintSpinner(window,dc);::ReleaseDC(window,dc);
-    }
-    if(message == WM_NCMOUSEMOVE || message == WM_NCMOUSELEAVE)
-    {
-        if((::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION) PaintNonClient(window);
+        const auto dc=::GetDC(window);if(cls==L"ComboBox")PaintComboBuffered(window,dc);else PaintSpinner(window,dc);::ReleaseDC(window,dc);
     }
     return result;
 }
@@ -3766,7 +3867,7 @@ BOOL CALLBACK Apply(HWND window, LPARAM)
         || cls == L"msctls_updown32" || cls == L"#32770" || cls == L"MDIClient" || cls.rfind(L"Afx", 0) == 0)
     {
         ::SetWindowSubclass(window, WindowProc, ThemeSubclassID, 0);
-        if(cls == L"Button" || cls == L"SysTabControl32" || cls == L"SysHeader32" || cls == L"SysTreeView32" || cls == L"SysListView32")
+        if(cls == L"Button" || (cls == L"ComboBox" && PlainCombo(window)) || cls == L"SysTabControl32" || cls == L"SysHeader32" || cls == L"SysTreeView32" || cls == L"SysListView32")
             ::SetWindowTheme(window, L"", L"");
         if(cls == L"SysTreeView32")
         { TreeView_SetBkColor(window, Color(COLOR_WINDOW)); TreeView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
@@ -3783,6 +3884,9 @@ void RegisterWindow(HWND window)
 {
     if(!window) return;
     if(std::find(roots.begin(), roots.end(), window) == roots.end()) roots.push_back(window);
+    // Custom chrome also owns the frame's visual styles, including MDI menu buttons.
+    // Disable the native theme before attaching our paint subclass.
+    if((::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION)::SetWindowTheme(window,L"",L"");
     Apply(window, 0); ::EnumChildWindows(window, Apply, 0);
     StyleMenu(::GetMenu(window), true);
     ::DrawMenuBar(window);

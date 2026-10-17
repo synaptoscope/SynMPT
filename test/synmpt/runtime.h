@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <cmath>
+#include "hover_chrome.h"
 
 OPENMPT_NAMESPACE_BEGIN
 namespace SynMPTChecks {
@@ -111,7 +112,7 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
             bool statusInk=false;for(int y=0;y<28;y++)for(int x=0;x<100;x++)if(GetRValue(::GetPixel(dc,x,y))>160)statusInk=true;
             check(statusInk,"status bar renders light Ready text");
             check(SynMPTTheme::Color(COLOR_ACTIVECAPTION)==SynMPTTheme::Color(COLOR_INACTIVECAPTION)
-                && GetRValue(SynMPTTheme::Color(COLOR_ACTIVECAPTION))>=40,"active/inactive captions share the lighter gray");
+                && SynMPTTheme::Color(COLOR_ACTIVECAPTION)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"active/inactive captions match the scrollbar gutter gray");
             struct SurfaceSearch{HWND owner;HWND surfaces[2]{};} search{source};
             ::EnumChildWindows(host,[](HWND child,LPARAM parameter)->BOOL{
                 auto &found=*reinterpret_cast<SurfaceSearch *>(parameter);wchar_t cls[64]{};::GetClassNameW(child,cls,64);
@@ -136,6 +137,7 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
             ::SelectObject(dc,previous);::DeleteObject(bitmap);::DeleteDC(dc);::DestroyWindow(host);
             log<<"PASS: plain disabled labels, readable status text, gray captions, persistent scrollbar surfaces, native hit-test passthrough, redraw lifecycle and 32-bit ranges\n";
         }
+        CheckHoverChrome(log);
         PatternFont::UpdateFont(nullptr);
         check(PatternFont::currentFont && PatternFont::currentFont->dib && PatternFont::currentFont->dib->antialiased,"modern pattern font builds a coverage atlas");
         log<<"PASS: track tint ownership, selection and syntax colors, antialiased glyph compositing, active M/S/record buttons, modern pattern font and rounded/hover/disabled scrollbar skin\n";
