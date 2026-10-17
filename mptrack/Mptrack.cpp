@@ -2967,6 +2967,9 @@ COLORREF Color(int index)
     case COLOR_WINDOW: return RGB(44,47,53);
     case COLOR_BTNFACE: case COLOR_MENU: return RGB(56,59,66);
     case COLOR_APPWORKSPACE: return RGB(35,38,43);
+    case COLOR_ACTIVECAPTION: case COLOR_INACTIVECAPTION: return RGB(48,51,57);
+    case COLOR_CAPTIONTEXT: return RGB(226,229,235);
+    case COLOR_INACTIVECAPTIONTEXT: return RGB(170,177,188);
     case COLOR_BTNSHADOW: return RGB(31,34,39);
     case COLOR_BTNHIGHLIGHT: return RGB(80,85,94);
     case COLOR_3DDKSHADOW: return RGB(24,27,31);
@@ -3072,7 +3075,8 @@ std::vector<HWND> roots;
 std::wstring Class(HWND window) { wchar_t name[128]{}; ::GetClassNameW(window, name, 128); return name; }
 constexpr UINT_PTR ThemeSubclassID = 0x53594E54;
 
-struct MenuEntry { HMENU menu; std::wstring text; bool bar, separator, submenu; };
+void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled);
+struct MenuEntry { HMENU menu; std::wstring text; bool bar, separator, submenu; HBITMAP bitmap = nullptr; };
 std::map<ULONG_PTR, std::unique_ptr<MenuEntry>> menuEntries;
 
 void StyleMenu(HMENU menu, bool bar)
@@ -3083,13 +3087,15 @@ void StyleMenu(HMENU menu, bool bar)
     for(int item = 0; item < ::GetMenuItemCount(menu); item++)
     {
         wchar_t label[512]{}; MENUITEMINFOW info{}; info.cbSize = sizeof(info);
-        info.fMask = MIIM_FTYPE | MIIM_DATA | MIIM_SUBMENU | MIIM_STRING;
+        info.fMask = MIIM_FTYPE | MIIM_DATA | MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP;
         info.dwTypeData = label; info.cch = 511;
         if(!::GetMenuItemInfoW(menu, item, TRUE, &info)) continue;
         if(info.hSubMenu) StyleMenu(info.hSubMenu, false);
         auto found = menuEntries.find(info.dwItemData);
         if((info.fType & MFT_OWNERDRAW) && found == menuEntries.end()) continue;
-        if(info.fType & MFT_BITMAP) continue;
+        const auto bitmapID = reinterpret_cast<UINT_PTR>(info.hbmpItem);
+        const bool systemButton = bar && (bitmapID == 2 || bitmapID == 3 || bitmapID == 5 || bitmapID == 6 || bitmapID == 7);
+        if(info.hbmpItem && !systemButton) continue;
         MenuEntry *entry = nullptr;
         if(found != menuEntries.end())
         {
@@ -3097,10 +3103,11 @@ void StyleMenu(HMENU menu, bool bar)
             if(label[0]) entry->text = label;
         } else
         {
-            auto value = std::make_unique<MenuEntry>(MenuEntry{menu, label, bar, (info.fType & MFT_SEPARATOR) != 0, info.hSubMenu != nullptr});
+            auto value = std::make_unique<MenuEntry>(MenuEntry{menu, label, bar, (info.fType & MFT_SEPARATOR) != 0, info.hSubMenu != nullptr, info.hbmpItem});
             entry = value.get(); menuEntries.emplace(reinterpret_cast<ULONG_PTR>(entry), std::move(value));
         }
-        info.fMask = MIIM_FTYPE | MIIM_DATA; info.fType |= MFT_OWNERDRAW; info.dwItemData = reinterpret_cast<ULONG_PTR>(entry);
+        info.fMask = MIIM_FTYPE | MIIM_DATA; info.fType = (info.fType & ~MFT_BITMAP) | MFT_OWNERDRAW; info.dwItemData = reinterpret_cast<ULONG_PTR>(entry);
+        if(entry->bitmap) { info.fMask |= MIIM_BITMAP; info.hbmpItem = nullptr; }
         ::SetMenuItemInfoW(menu, item, TRUE, &info);
     }
 }
@@ -3121,14 +3128,19 @@ bool MenuMessage(HWND window, UINT message, WPARAM, LPARAM lParam, LRESULT &resu
         const auto dc = ::GetDC(window); const auto font = ::SelectObject(dc, CMainFrame::GetGUIFont());
         SIZE size{}; ::GetTextExtentPoint32W(dc, entry.text.c_str(), static_cast<int>(entry.text.size()), &size);
         ::SelectObject(dc, font); ::ReleaseDC(window, dc);
-        measure->itemWidth = size.cx + padding * (entry.bar ? 2 : 5);
-        measure->itemHeight = entry.separator ? padding : std::max<LONG>(size.cy + padding, MulDiv(22, dpi, 96));
+        measure->itemWidth = entry.bitmap ? MulDiv(18,dpi,96) : size.cx + padding * (entry.bar ? 2 : 5);
+        measure->itemHeight = entry.bitmap ? MulDiv(18,dpi,96) : entry.separator ? padding : std::max<LONG>(size.cy + padding, MulDiv(22, dpi, 96));
     } else
     {
         auto *draw = reinterpret_cast<DRAWITEMSTRUCT *>(lParam); const int saved = ::SaveDC(draw->hDC);
         CRect rect(draw->rcItem); const bool selected = (draw->itemState & ODS_SELECTED) != 0;
         ::FillRect(draw->hDC, rect, Brush(selected ? COLOR_HIGHLIGHT : COLOR_MENU));
-        if(entry.separator)
+        if(entry.bitmap)
+        {
+            const auto bitmap = reinterpret_cast<UINT_PTR>(entry.bitmap);
+            const auto command = bitmap == 2 ? SC_RESTORE : (bitmap == 3 || bitmap == 7) ? SC_MINIMIZE : SC_CLOSE;
+            DrawCaptionButton(draw->hDC, rect, command, selected, (draw->itemState & (ODS_DISABLED | ODS_GRAYED)) || bitmap == 6 || bitmap == 7);
+        } else if(entry.separator)
         {
             rect.top = rect.CenterPoint().y; rect.bottom = rect.top + 1; rect.DeflateRect(padding, 0);
             ::FillRect(draw->hDC, rect, Brush(COLOR_BTNHIGHLIGHT));
@@ -3202,7 +3214,7 @@ void PaintButton(HWND window, HDC dc)
 
 
 constexpr UINT_PTR ScrollPaintTimer = 0x53594E53;
-struct ScrollAppearance { SCROLLBARINFO bars[2]{}; };
+struct ScrollAppearance { SCROLLBARINFO bars[2]{}; HWND surfaces[3]{}; };
 std::map<HWND, ScrollAppearance> scrollAppearances;
 
 bool ScrollInfo(HWND window, LONG object, SCROLLBARINFO &info)
@@ -3213,52 +3225,125 @@ bool ScrollInfo(HWND window, LONG object, SCROLLBARINFO &info)
         && info.rcScrollBar.right > info.rcScrollBar.left && info.rcScrollBar.bottom > info.rcScrollBar.top;
 }
 
+constexpr UINT ScrollSurfaceID = 0x7A10;
+constexpr wchar_t ScrollSurfaceClass[] = L"SynMPT.ScrollSurface";
+
+LRESULT CALLBACK ScrollSurfaceProc(HWND surface, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if(message == WM_NCCREATE)
+        ::SetWindowLongPtr(surface, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCT *>(lParam)->lpCreateParams));
+    // The real native scrollbar underneath owns accessibility, hit testing and 32-bit tracking.
+    if(message == WM_NCHITTEST) return HTTRANSPARENT;
+    if(message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if(message == WM_ERASEBKGND) return TRUE;
+    if(message == WM_PAINT || message == WM_PRINTCLIENT)
+    {
+        PAINTSTRUCT paint{};
+        const auto dc = message == WM_PAINT ? ::BeginPaint(surface, &paint) : reinterpret_cast<HDC>(wParam);
+        RECT client{}; ::GetClientRect(surface, &client); ::FillRect(dc, &client, Brush(COLOR_APPWORKSPACE));
+        const auto owner = reinterpret_cast<HWND>(::GetWindowLongPtr(surface, GWLP_USERDATA));
+        const int axis = ::GetDlgCtrlID(surface) - ScrollSurfaceID;
+        SCROLLBARINFO info{};
+        if(axis < 2 && ScrollInfo(owner, Class(owner) == L"ScrollBar" ? OBJID_CLIENT : axis ? OBJID_VSCROLL : OBJID_HSCROLL, info))
+        {
+            POINT pointer{}; ::GetCursorPos(&pointer);
+            const bool hot = ::PtInRect(&info.rcScrollBar, pointer) != FALSE;
+            info.rcScrollBar = client; DrawScrollBar(dc, info, axis == 1, hot);
+        }
+        if(message == WM_PAINT) ::EndPaint(surface, &paint);
+        return 0;
+    }
+    return ::DefWindowProcW(surface, message, wParam, lParam);
+}
+
+void DestroyScrollSurfaces(HWND window)
+{
+    const auto found = scrollAppearances.find(window);
+    if(found == scrollAppearances.end()) return;
+    // Remove the entry before destruction can notify/re-enter the parent.
+    const auto appearance = found->second; scrollAppearances.erase(found);
+    for(auto surface : appearance.surfaces) if(::IsWindow(surface)) ::DestroyWindow(surface);
+}
+
 void PaintScrollBars(HWND window)
 {
-    if(!::IsWindowVisible(window)) return;
     const bool control = Class(window) == L"ScrollBar";
     const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
-    if(!control && !(style & (WS_HSCROLL | WS_VSCROLL))) return;
-    const auto dc = control ? ::GetDC(window) : ::GetWindowDC(window);
-    if(!dc) return;
-    RECT frame{}; ::GetWindowRect(window, &frame);
-    POINT origin{frame.left, frame.top}, pointer{};
+    const auto parent = ::GetParent(window);
+    if(!(style & WS_VISIBLE) || (!control && !(style & (WS_HSCROLL | WS_VSCROLL))))
+    {
+        const auto found = scrollAppearances.find(window);
+        if(found != scrollAppearances.end()) for(auto surface : found->second.surfaces)
+            if(::IsWindow(surface)) ::ShowWindow(surface, SW_HIDE);
+        return;
+    }
+    // An opaque sibling surface clips native NC redraws, so they cannot replace the skin.
+    // HTTRANSPARENT routes input to the original window in the same UI thread.
+    if((style & WS_CHILD) && parent)
+    {
+        static const ATOM surfaceClass = [] {
+            WNDCLASSW type{}; type.lpfnWndProc = ScrollSurfaceProc; type.hInstance = AfxGetInstanceHandle();
+            type.lpszClassName = ScrollSurfaceClass; type.hCursor = ::LoadCursor(nullptr, IDC_ARROW);
+            return ::RegisterClassW(&type);
+        }();
+        if(!surfaceClass) return;
+        ::SetWindowLongPtr(window, GWL_STYLE, style | WS_CLIPSIBLINGS);
+        auto &appearance = scrollAppearances[window];
+        bool visible[3]{}; RECT positions[3]{};
+        for(int axis = 0; axis < 2; axis++)
+        {
+            visible[axis] = (!control || axis == ((style & SBS_VERT) ? 1 : 0))
+                && ScrollInfo(window, control ? OBJID_CLIENT : axis ? OBJID_VSCROLL : OBJID_HSCROLL, appearance.bars[axis]);
+            positions[axis] = appearance.bars[axis].rcScrollBar;
+        }
+        if(!control && visible[0] && visible[1])
+        {
+            const auto &h = positions[0]; const auto &v = positions[1];
+            positions[2] = {v.left, h.top, v.right, h.bottom}; visible[2] = !::IsRectEmpty(&positions[2]);
+        }
+        for(int axis = 0; axis < 3; axis++)
+        {
+            auto &surface = appearance.surfaces[axis];
+            if(!visible[axis]) { if(::IsWindow(surface)) ::ShowWindow(surface, SW_HIDE); continue; }
+            if(!::IsWindow(surface)) surface = ::CreateWindowExW(WS_EX_NOPARENTNOTIFY, ScrollSurfaceClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
+                0,0,0,0,parent,reinterpret_cast<HMENU>(static_cast<INT_PTR>(ScrollSurfaceID + axis)),AfxGetInstanceHandle(),window);
+            if(!surface) continue;
+            auto rect = positions[axis]; ::MapWindowPoints(nullptr, parent, reinterpret_cast<POINT *>(&rect), 2);
+            RECT previous{}; ::GetWindowRect(surface, &previous); ::MapWindowPoints(nullptr, parent, reinterpret_cast<POINT *>(&previous), 2);
+            const bool moved = !::EqualRect(&rect, &previous);
+            ::SetWindowPos(surface, HWND_TOP, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW | (moved ? 0 : SWP_NOMOVE | SWP_NOSIZE));
+            ::RedrawWindow(surface, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+        }
+        return;
+    }
+    // Standalone scroll controls have their own client paint procedure already.
+    if(!::IsWindowVisible(window)) return;
+    const auto dc = control ? ::GetDC(window) : ::GetWindowDC(window); if(!dc) return;
+    RECT frame{}; ::GetWindowRect(window, &frame); POINT origin{frame.left, frame.top}, pointer{};
     if(control) { origin = {}; ::ClientToScreen(window, &origin); }
     ::GetCursorPos(&pointer);
-    ScrollAppearance appearance;
-    for(int axis = 0; axis < 2; axis++)
+    for(int axis = 0; axis < (control ? 1 : 2); axis++)
     {
         const bool vertical = control ? (style & SBS_VERT) != 0 : axis == 1;
-        auto &info = appearance.bars[axis];
-        if((control && axis != 0) || !ScrollInfo(window, control ? OBJID_CLIENT : vertical ? OBJID_VSCROLL : OBJID_HSCROLL, info)) continue;
+        SCROLLBARINFO info{};
+        if(!ScrollInfo(window, control ? OBJID_CLIENT : vertical ? OBJID_VSCROLL : OBJID_HSCROLL, info)) continue;
         const bool hot = ::PtInRect(&info.rcScrollBar, pointer) != FALSE;
-        ::OffsetRect(&info.rcScrollBar, -origin.x, -origin.y);
-        DrawScrollBar(dc, info, vertical, hot);
-    }
-    if(!control && (style & WS_HSCROLL) && (style & WS_VSCROLL))
-    {
-        // The corner belongs to neither bar; its native size-grip behavior is retained.
-        const auto &h = appearance.bars[0].rcScrollBar; const auto &v = appearance.bars[1].rcScrollBar;
-        RECT corner{v.left, h.top, v.right, h.bottom};
-        if(!::IsRectEmpty(&corner)) ::FillRect(dc, &corner, Brush(COLOR_APPWORKSPACE));
+        ::OffsetRect(&info.rcScrollBar, -origin.x, -origin.y); DrawScrollBar(dc, info, vertical, hot);
     }
     ::ReleaseDC(window, dc);
-    scrollAppearances[window] = appearance;
 }
 
 void RefreshScrollBars(HWND window)
 {
     const auto found = scrollAppearances.find(window);
     if(found == scrollAppearances.end()) return;
-    const bool control = Class(window) == L"ScrollBar";
-    RECT frame{}; ::GetWindowRect(window, &frame);
-    POINT origin{frame.left, frame.top};
-    if(control) { origin = {}; ::ClientToScreen(window, &origin); }
-    for(int axis = 0; axis < (control ? 1 : 2); axis++)
+    for(int axis = 0; axis < 2; axis++)
     {
         SCROLLBARINFO current{};
-        if(ScrollInfo(window, control ? OBJID_CLIENT : axis ? OBJID_VSCROLL : OBJID_HSCROLL, current))
-            ::OffsetRect(&current.rcScrollBar, -origin.x, -origin.y);
+        const bool control = Class(window) == L"ScrollBar";
+        if(!control || axis == ((::GetWindowLongPtr(window,GWL_STYLE) & SBS_VERT) ? 1 : 0))
+            ScrollInfo(window, control ? OBJID_CLIENT : axis ? OBJID_VSCROLL : OBJID_HSCROLL, current);
         if(std::memcmp(&current, &found->second.bars[axis], sizeof(current))) { PaintScrollBars(window); return; }
     }
 }
@@ -3356,41 +3441,177 @@ void PaintHeader(HWND window, HDC dc)
     ::RestoreDC(dc, saved);
 }
 
+bool TextStatic(HWND window)
+{
+    const auto type = ::GetWindowLongPtr(window, GWL_STYLE) & SS_TYPEMASK;
+    return type == SS_LEFT || type == SS_CENTER || type == SS_RIGHT || type == SS_SIMPLE || type == SS_LEFTNOWORDWRAP;
+}
+
+void PaintStatic(HWND window, HDC dc)
+{
+    RECT rect{}; ::GetClientRect(window, &rect); ::FillRect(dc, &rect, Brush(COLOR_BTNFACE));
+    const int saved = ::SaveDC(dc);
+    const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
+    const auto font = reinterpret_cast<HFONT>(::SendMessage(window, WM_GETFONT, 0, 0));
+    ::SelectObject(dc, font ? font : CMainFrame::GetGUIFont()); ::SetBkMode(dc, TRANSPARENT);
+    ::SetTextColor(dc, Color(::IsWindowEnabled(window) ? COLOR_BTNTEXT : COLOR_GRAYTEXT));
+    wchar_t label[1024]{}; ::GetWindowTextW(window, label, 1024);
+    UINT flags = DT_EXPANDTABS | ((style & SS_TYPEMASK) == SS_CENTER ? DT_CENTER : (style & SS_TYPEMASK) == SS_RIGHT ? DT_RIGHT : DT_LEFT);
+    if(style & SS_NOPREFIX) flags |= DT_NOPREFIX;
+    if(style & SS_CENTERIMAGE) flags |= DT_SINGLELINE | DT_VCENTER;
+    else if((style & SS_TYPEMASK) != SS_SIMPLE && (style & SS_TYPEMASK) != SS_LEFTNOWORDWRAP) flags |= DT_WORDBREAK;
+    if((style & SS_ELLIPSISMASK) == SS_ENDELLIPSIS) flags |= DT_END_ELLIPSIS;
+    if((style & SS_ELLIPSISMASK) == SS_PATHELLIPSIS) flags |= DT_PATH_ELLIPSIS;
+    ::DrawTextW(dc, label, -1, &rect, flags); ::RestoreDC(dc, saved);
+}
+
+void PaintStatus(HWND window, HDC dc)
+{
+    RECT bounds{}; ::GetClientRect(window, &bounds); ::FillRect(dc, &bounds, Brush(COLOR_BTNFACE));
+    const int saved = ::SaveDC(dc), padding = MulDiv(5, HighDPISupport::GetDpiForWindow(window), 96);
+    const auto font = reinterpret_cast<HFONT>(::SendMessage(window, WM_GETFONT, 0, 0));
+    ::SelectObject(dc, font ? font : CMainFrame::GetGUIFont()); ::SetBkMode(dc, TRANSPARENT); ::SetTextColor(dc, Color(COLOR_BTNTEXT));
+    const bool simple = ::SendMessage(window, SB_ISSIMPLE, 0, 0) != 0;
+    const int count = simple ? 1 : static_cast<int>(::SendMessage(window, SB_GETPARTS, 0, 0));
+    for(int index = 0; index < count; index++)
+    {
+        RECT item = bounds;
+        if(!simple && !::SendMessage(window, SB_GETRECT, index, reinterpret_cast<LPARAM>(&item))) continue;
+        const auto part = simple ? SB_SIMPLEID : index;
+        const auto length = ::SendMessageW(window, SB_GETTEXTLENGTHW, part, 0);
+        const UINT type = HIWORD(length);
+        if(type & SBT_OWNERDRAW)
+        {
+            DRAWITEMSTRUCT draw{}; draw.CtlType=0; draw.CtlID=::GetDlgCtrlID(window); draw.itemID=index;
+            draw.itemAction=ODA_DRAWENTIRE;draw.hwndItem=window;draw.hDC=dc;draw.rcItem=item;
+            draw.itemData=::SendMessage(window, SB_GETTEXT, part, 0);
+            ::SendMessage(::GetParent(window),WM_DRAWITEM,draw.CtlID,reinterpret_cast<LPARAM>(&draw)); continue;
+        }
+        if(index) { RECT edge=item; edge.right=edge.left+1; ::FillRect(dc,&edge,Brush(COLOR_BTNSHADOW)); }
+        std::wstring text(LOWORD(length)+1, L'\0'); ::SendMessageW(window,SB_GETTEXTW,part,reinterpret_cast<LPARAM>(text.data()));
+        CRect rect(item); rect.DeflateRect(padding,0);
+        const auto first = text.find(L'\t');
+        if(first == std::wstring::npos) ::DrawTextW(dc,text.c_str(),-1,rect,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|DT_END_ELLIPSIS);
+        else
+        {
+            const auto second = text.find(L'\t',first+1);
+            ::DrawTextW(dc,text.c_str(),static_cast<int>(first),rect,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+            ::DrawTextW(dc,text.c_str()+first+1,second==std::wstring::npos ? -1 : static_cast<int>(second-first-1),rect,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+            if(second!=std::wstring::npos) ::DrawTextW(dc,text.c_str()+second+1,-1,rect,DT_RIGHT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+        }
+    }
+    ::RestoreDC(dc,saved);
+}
+
+bool PlainCombo(HWND window)
+{
+    const auto style = ::GetWindowLongPtr(window,GWL_STYLE);
+    return (style & 3) == CBS_DROPDOWNLIST && !(style & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE));
+}
+
+void PaintCombo(HWND window,HDC dc)
+{
+    COMBOBOXINFO info{};info.cbSize=sizeof(info);::GetComboBoxInfo(window,&info);
+    RECT bounds{};::GetClientRect(window,&bounds);::FillRect(dc,&bounds,Brush(COLOR_WINDOW));::FrameRect(dc,&bounds,Brush(COLOR_BTNHIGHLIGHT));
+    const int saved=::SaveDC(dc);const bool enabled=::IsWindowEnabled(window)!=FALSE;
+    const auto font=reinterpret_cast<HFONT>(::SendMessage(window,WM_GETFONT,0,0));::SelectObject(dc,font ? font : CMainFrame::GetGUIFont());
+    ::SetBkMode(dc,TRANSPARENT);::SetTextColor(dc,Color(enabled ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
+    CRect item(info.rcItem); item.DeflateRect(3,0);wchar_t text[1024]{};::GetWindowTextW(window,text,1024);
+    ::DrawTextW(dc,text,-1,item,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|DT_END_ELLIPSIS);
+    ::FillRect(dc,&info.rcButton,Brush(COLOR_BTNFACE));::DrawTextW(dc,L"\u2304",-1,&info.rcButton,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    if(::GetFocus()==window) { item.DeflateRect(0,2);::DrawFocusRect(dc,item); }
+    ::RestoreDC(dc,saved);
+}
+
+void PaintSpinner(HWND window, HDC dc)
+{
+    RECT bounds{}; ::GetClientRect(window,&bounds);::FillRect(dc,&bounds,Brush(COLOR_BTNFACE));
+    const bool horizontal=(::GetWindowLongPtr(window,GWL_STYLE)&UDS_HORZ)!=0;
+    const int saved=::SaveDC(dc);::SelectObject(dc,CMainFrame::GetGUIFont());::SetBkMode(dc,TRANSPARENT);
+    ::SetTextColor(dc,Color(::IsWindowEnabled(window) ? COLOR_BTNTEXT : COLOR_GRAYTEXT));
+    POINT pointer{};::GetCursorPos(&pointer);::ScreenToClient(window,&pointer);
+    for(int part=0;part<2;part++)
+    {
+        CRect rect(bounds);
+        if(horizontal) { if(part)rect.left=rect.CenterPoint().x;else rect.right=rect.CenterPoint().x; }
+        else { if(part)rect.top=rect.CenterPoint().y;else rect.bottom=rect.CenterPoint().y; }
+        if(::IsWindowEnabled(window) && rect.PtInRect(pointer))::FillRect(dc,rect,Brush(COLOR_3DLIGHT));
+        ::DrawTextW(dc,horizontal ? (part ? L"\u203a" : L"\u2039") : (part ? L"\u25be" : L"\u25b4"),-1,rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    }
+    ::RestoreDC(dc,saved);
+}
+
+void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled)
+{
+    ::FillRect(dc,rect,Brush(hot ? COLOR_3DLIGHT : COLOR_ACTIVECAPTION));
+    const int saved=::SaveDC(dc);
+    ::SelectObject(dc,GetStockObject(DC_PEN));::SelectObject(dc,GetStockObject(NULL_BRUSH));
+    ::SetDCPenColor(dc,Color(disabled ? COLOR_GRAYTEXT : COLOR_CAPTIONTEXT));
+    const auto center=rect.CenterPoint();const int size=std::max(3,std::min(rect.Width(),rect.Height())/5);
+    if(command==SC_CLOSE)
+    {
+        if(hot) { ::SetDCBrushColor(dc,RGB(179,63,78));::FillRect(dc,rect,GetStockBrush(DC_BRUSH)); }
+        ::MoveToEx(dc,center.x-size,center.y-size,nullptr);::LineTo(dc,center.x+size+1,center.y+size+1);
+        ::MoveToEx(dc,center.x+size,center.y-size,nullptr);::LineTo(dc,center.x-size-1,center.y+size+1);
+    } else if(command==SC_MINIMIZE)
+    { ::MoveToEx(dc,center.x-size,center.y,nullptr);::LineTo(dc,center.x+size+1,center.y); }
+    else if(command==SC_MAXIMIZE) ::Rectangle(dc,center.x-size,center.y-size,center.x+size+1,center.y+size+1);
+    else
+    {
+        ::Rectangle(dc,center.x-size+2,center.y-size-1,center.x+size+2,center.y+size-1);
+        ::SetDCBrushColor(dc,Color(COLOR_ACTIVECAPTION));::SelectObject(dc,GetStockObject(DC_BRUSH));
+        ::Rectangle(dc,center.x-size,center.y-size+1,center.x+size,center.y+size+1);
+    }
+    ::RestoreDC(dc,saved);
+}
+
 void PaintNonClient(HWND window)
 {
     const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
     const auto extended = ::GetWindowLongPtr(window, GWL_EXSTYLE);
-    // Windows keeps the main title bar. App tool captions and child pane borders are ours.
-    const bool toolCaption = (extended & WS_EX_TOOLWINDOW) && (style & WS_CAPTION) == WS_CAPTION;
-    const bool captionless = (style & WS_CAPTION) != WS_CAPTION;
-    if(!toolCaption && !captionless) { PaintScrollBars(window); return; }
-    RECT frame{}, client{}; ::GetWindowRect(window, &frame); ::GetClientRect(window, &client);
-    POINT offset{}; ::ClientToScreen(window, &offset);
-    ::OffsetRect(&client, offset.x - frame.left, offset.y - frame.top);
-    ::OffsetRect(&frame, -frame.left, -frame.top);
-    const auto dc = ::GetWindowDC(window); if(!dc) return;
-    const int saved = ::SaveDC(dc);
-    ::ExcludeClipRect(dc, client.left, client.top, client.right, client.bottom);
-    ::FillRect(dc, &frame, Brush(COLOR_BTNFACE));
-    ::FrameRect(dc, &frame, Brush(COLOR_BTNSHADOW));
-    ::RestoreDC(dc, saved);
-    if(toolCaption)
+    const bool captioned = (style & WS_CAPTION) == WS_CAPTION;
+    RECT screen{}, client{}; ::GetWindowRect(window,&screen);::GetClientRect(window,&client);
+    POINT offset{};::ClientToScreen(window,&offset);::OffsetRect(&client,offset.x-screen.left,offset.y-screen.top);
+    CRect frame(0,0,screen.right-screen.left,screen.bottom-screen.top);
+    const auto dc=::GetWindowDC(window);if(!dc)return;
+    const int saved=::SaveDC(dc);::ExcludeClipRect(dc,client.left,client.top,client.right,client.bottom);
+    // Preserve the menu bar and its owner-drawn entries.
+    MENUBARINFO menu{};menu.cbSize=sizeof(menu);
+    if(::GetMenuBarInfo(window,OBJID_MENU,0,&menu))
+    { ::OffsetRect(&menu.rcBar,-screen.left,-screen.top);::ExcludeClipRect(dc,menu.rcBar.left,menu.rcBar.top,menu.rcBar.right,menu.rcBar.bottom); }
+    ::FillRect(dc,frame,Brush(COLOR_BTNFACE));::FrameRect(dc,frame,Brush(COLOR_BTNSHADOW));
+    ::RestoreDC(dc,saved);
+    if(captioned)
     {
-        // Native hit testing still moves/closes the frame; title geometry comes from Windows.
-        TITLEBARINFO title{}; title.cbSize = sizeof(title);
-        if(::GetTitleBarInfo(window, &title))
+        TITLEBARINFOEX title{};title.cbSize=sizeof(title);::SendMessage(window,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
+        CRect caption(title.rcTitleBar);caption.OffsetRect(-screen.left,-screen.top);caption.IntersectRect(caption,frame);
+        if(!caption.IsRectEmpty())
         {
-            CRect caption(title.rcTitleBar); caption.OffsetRect(-offset.x + client.left, -offset.y + client.top);
-            caption.IntersectRect(caption, &frame);
-            const int button = caption.Height();
-            CRect close(caption); close.left = std::max(close.left, close.right - button);
-            const int state = ::SaveDC(dc);
-            ::SelectObject(dc, CMainFrame::GetGUIFont()); ::SetBkMode(dc, TRANSPARENT); ::SetTextColor(dc, Color(COLOR_BTNTEXT));
-            if(style & WS_SYSMENU) ::DrawTextW(dc, L"\u00d7", -1, close, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            caption.left += MulDiv(6, HighDPISupport::GetDpiForWindow(window), 96); caption.right = close.left - 4;
-            wchar_t label[512]{}; ::GetWindowTextW(window, label, 512);
-            ::DrawTextW(dc, label, -1, caption, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-            ::RestoreDC(dc, state);
+            const int state=::SaveDC(dc);::FillRect(dc,caption,Brush(COLOR_ACTIVECAPTION));
+            POINT pointer{};::GetCursorPos(&pointer);
+            const UINT commands[]{0,0,SC_MINIMIZE,static_cast<UINT>(::IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE),0,SC_CLOSE};
+            for(int part : {2,3,5})
+            {
+                if(title.rgstate[part] & (STATE_SYSTEM_INVISIBLE|STATE_SYSTEM_OFFSCREEN)) continue;
+                CRect button(title.rgrect[part]);if(button.IsRectEmpty())continue;
+                const bool hot=button.PtInRect(pointer)!=FALSE;button.OffsetRect(-screen.left,-screen.top);
+                DrawCaptionButton(dc,button,commands[part],hot,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0);
+                caption.right=std::min(caption.right,button.left);
+            }
+            const int padding=MulDiv(6,HighDPISupport::GetDpiForWindow(window),96);caption.left+=padding;
+            if(!(extended & WS_EX_TOOLWINDOW) && (style & WS_SYSMENU))
+            {
+                auto icon=reinterpret_cast<HICON>(::SendMessage(window,WM_GETICON,ICON_SMALL,0));
+                if(!icon)icon=reinterpret_cast<HICON>(::GetClassLongPtr(window,GCLP_HICONSM));
+                const int size=MulDiv(16,HighDPISupport::GetDpiForWindow(window),96);
+                if(icon)::DrawIconEx(dc,caption.left,caption.CenterPoint().y-size/2,icon,size,size,0,nullptr,DI_NORMAL);
+                caption.left+=size+padding;
+            }
+            ::SelectObject(dc,CMainFrame::GetGUIFont());::SetBkMode(dc,TRANSPARENT);
+            const bool active=::GetActiveWindow()==window || ::GetAncestor(::GetActiveWindow(),GA_ROOTOWNER)==window;
+            ::SetTextColor(dc,Color(active ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT));
+            wchar_t label[1024]{};::GetWindowTextW(window,label,1024);
+            ::DrawTextW(dc,label,-1,caption,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);::RestoreDC(dc,state);
         }
     }
     ::ReleaseDC(window, dc);
@@ -3431,6 +3652,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if(message == WM_PAINT) ::EndPaint(window, &paint);
         return 0;
     }
+    if((message == WM_PAINT || message == WM_PRINTCLIENT) && ((cls == L"Static" && TextStatic(window))
+        || cls == L"msctls_statusbar32" || cls == L"msctls_updown32" || (cls == L"ComboBox" && PlainCombo(window))))
+    {
+        if(cls==L"msctls_statusbar32")
+        {
+            // Flush MFC's deferred pane-text cache before replacing its native paint route.
+            if(auto *bar=dynamic_cast<CStatusBar *>(CWnd::FromHandlePermanent(window)))
+                for(int pane=0;pane<bar->GetCount();pane++) bar->SetPaneText(pane,bar->GetPaneText(pane));
+        }
+        PAINTSTRUCT paint{};const auto dc=message==WM_PAINT ? ::BeginPaint(window,&paint) : reinterpret_cast<HDC>(wParam);
+        if(cls==L"Static")PaintStatic(window,dc);else if(cls==L"ComboBox")PaintCombo(window,dc);
+        else if(cls==L"msctls_updown32")PaintSpinner(window,dc);else PaintStatus(window,dc);
+        if(message==WM_PAINT)::EndPaint(window,&paint);return 0;
+    }
     if(message == WM_PAINT && cls == L"ScrollBar")
     {
         PAINTSTRUCT paint{}; ::BeginPaint(window, &paint); ::EndPaint(window, &paint);
@@ -3464,6 +3699,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     {
         auto *draw = reinterpret_cast<NMCUSTOMDRAW *>(lParam);
         const auto childClass = Class(draw->hdr.hwndFrom);
+        if(childClass == L"SysTreeView32")
+        {
+            if(draw->dwDrawStage==CDDS_PREPAINT)return CDRF_NOTIFYITEMDRAW;
+            if(draw->dwDrawStage==CDDS_ITEMPREPAINT)
+            {
+                auto *tree=reinterpret_cast<NMTVCUSTOMDRAW *>(lParam);
+                const bool selected=(draw->uItemState&CDIS_SELECTED)!=0;
+                tree->clrText=Color(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
+                tree->clrTextBk=Color(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW);return CDRF_NEWFONT;
+            }
+        }
         if(childClass == L"ToolbarWindow32")
         {
             auto *toolbar = reinterpret_cast<NMTBCUSTOMDRAW *>(lParam);
@@ -3478,18 +3724,33 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     if(message == WM_NCDESTROY)
     {
-        ::KillTimer(window, ScrollPaintTimer); scrollAppearances.erase(window);
+        ::KillTimer(window, ScrollPaintTimer); DestroyScrollSurfaces(window);
         ::RemoveWindowSubclass(window, WindowProc, ThemeSubclassID);
         return ::DefSubclassProc(window, message, wParam, lParam);
     }
     const auto result = ::DefSubclassProc(window, message, wParam, lParam);
+    if(cls==L"MDIClient" && (message==WM_MDISETMENU || message==WM_MDIREFRESHMENU || message==WM_MDIMAXIMIZE || message==WM_MDIRESTORE))
+    {
+        const auto frame=::GetParent(window);StyleMenu(::GetMenu(frame),true);::DrawMenuBar(frame);
+    }
     if(message == WM_NCPAINT || message == WM_NCACTIVATE || message == WM_SETTEXT)
         PaintNonClient(window);
-    else if(message == WM_PAINT || message == WM_SIZE || message == WM_WINDOWPOSCHANGED
+    else if(message == WM_PAINT || message == WM_SIZE || message == WM_WINDOWPOSCHANGED || message == WM_SHOWWINDOW
         || message == WM_HSCROLL || message == WM_VSCROLL || message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL
         || message == WM_NCMOUSEMOVE || message == WM_NCMOUSELEAVE || message == WM_MOUSELEAVE
-        || (message == WM_MOUSEMOVE && cls == L"ScrollBar"))
+        || (message == WM_MOUSEMOVE && cls == L"ScrollBar")
+        || (cls == L"ScrollBar" && (message == SBM_SETSCROLLINFO || message == SBM_SETPOS || message == SBM_SETRANGE || message == SBM_SETRANGEREDRAW || message == SBM_ENABLE_ARROWS || message == WM_ENABLE)))
         PaintScrollBars(window);
+    if((cls==L"msctls_updown32" || (cls==L"ComboBox" && PlainCombo(window)))
+        && (message==WM_ENABLE || message==WM_SETFOCUS || message==WM_KILLFOCUS || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP
+            || message==WM_TIMER || message==WM_MOUSEMOVE || message==WM_MOUSELEAVE || message==CB_SETCURSEL))
+    {
+        const auto dc=::GetDC(window);if(cls==L"ComboBox")PaintCombo(window,dc);else PaintSpinner(window,dc);::ReleaseDC(window,dc);
+    }
+    if(message == WM_NCMOUSEMOVE || message == WM_NCMOUSELEAVE)
+    {
+        if((::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION) PaintNonClient(window);
+    }
     return result;
 }
 
@@ -3511,6 +3772,7 @@ BOOL CALLBACK Apply(HWND window, LPARAM)
         { TreeView_SetBkColor(window, Color(COLOR_WINDOW)); TreeView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
         if(cls == L"SysListView32")
         { ListView_SetBkColor(window, Color(COLOR_WINDOW)); ListView_SetTextBkColor(window, Color(COLOR_WINDOW)); ListView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
+        PaintScrollBars(window);
         ::RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
     }
     return TRUE;
@@ -3528,7 +3790,15 @@ void RegisterWindow(HWND window)
     using SetAttribute = HRESULT (WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
     static const auto library = ::LoadLibraryW(L"dwmapi.dll");
     static const auto setAttribute = library ? reinterpret_cast<SetAttribute>(::GetProcAddress(library, "DwmSetWindowAttribute")) : nullptr;
-    if(setAttribute) { const BOOL dark = TRUE; setAttribute(window, 20, &dark, sizeof(dark)); }
+    if(setAttribute)
+    {
+        // Win10 has no caption-color attribute. Disable only this window's DWM NC paint,
+        // then retain native frame metrics/hit testing and draw its gray caption ourselves.
+        const DWORD nativePaintingDisabled=1;setAttribute(window,2,&nativePaintingDisabled,sizeof(nativePaintingDisabled));
+        const COLORREF caption=Color(COLOR_ACTIVECAPTION),text=Color(COLOR_CAPTIONTEXT);
+        setAttribute(window,35,&caption,sizeof(caption));setAttribute(window,36,&text,sizeof(text));
+    }
+    ::RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_FRAME);
 }
 
 void RefreshWindows()

@@ -81,6 +81,61 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
             check(pixel(16,8)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"disabled scrollbar hides its unusable thumb");
             ::SelectObject(dc,oldBitmap);::DeleteObject(bitmap);::DeleteDC(dc);
         }
+        {
+            INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_BAR_CLASSES|ICC_STANDARD_CLASSES};::InitCommonControlsEx(&controls);
+            const auto host=::CreateWindowExW(0,L"STATIC",L"Theme regression host",WS_POPUP,0,0,260,180,nullptr,nullptr,AfxGetInstanceHandle(),nullptr);
+            check(host!=nullptr,"create owned hidden theme fixture");
+            const auto label=::CreateWindowExW(0,L"STATIC",L"Sequence",WS_CHILD|WS_VISIBLE|WS_DISABLED|SS_LEFT,0,0,160,28,host,nullptr,AfxGetInstanceHandle(),nullptr);
+            const auto status=::CreateWindowExW(0,STATUSCLASSNAMEW,L"",WS_CHILD|WS_VISIBLE|CCS_NORESIZE,0,40,240,28,host,nullptr,AfxGetInstanceHandle(),nullptr);
+            const auto source=::CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|WS_HSCROLL|WS_VSCROLL,0,80,220,90,host,nullptr,AfxGetInstanceHandle(),nullptr);
+            check(label && status && source,"create label/status/scroll fixtures");
+            const auto font=::GetStockObject(DEFAULT_GUI_FONT);::SendMessage(label,WM_SETFONT,reinterpret_cast<WPARAM>(font),0);::SendMessage(status,WM_SETFONT,reinterpret_cast<WPARAM>(font),0);
+            const int parts[]{-1};::SendMessage(status,SB_SETPARTS,1,reinterpret_cast<LPARAM>(parts));::SendMessageW(status,SB_SETTEXTW,0,reinterpret_cast<LPARAM>(L"Ready"));
+            SCROLLINFO range{};range.cbSize=sizeof(range);range.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;range.nMax=1000000;range.nPage=1000;range.nPos=400000;
+            ::SetScrollInfo(source,SB_VERT,&range,TRUE);::SetScrollInfo(source,SB_HORZ,&range,TRUE);
+            SynMPTTheme::RegisterWindow(host);
+            const auto dc=::CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth=260;info.bmiHeader.biHeight=-40;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+            void *pixels=nullptr;const auto bitmap=::CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);check(dc && bitmap && pixels,"allocate native control test bitmap");
+            const auto previous=::SelectObject(dc,bitmap);
+            ::SendMessage(label,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT);::GdiFlush();
+            bool grayInk=false;
+            for(int y=0;y<28;y++)for(int x=0;x<160;x++)
+            {
+                const auto color=::GetPixel(dc,x,y);
+                check(color!=RGB(255,255,255),"disabled Sequence label does not emboss a white shadow");
+                if(GetRValue(color)>100)grayInk=true;
+            }
+            check(grayInk,"disabled Sequence label still renders readable text");
+            ::SendMessage(status,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT);::GdiFlush();
+            bool statusInk=false;for(int y=0;y<28;y++)for(int x=0;x<100;x++)if(GetRValue(::GetPixel(dc,x,y))>160)statusInk=true;
+            check(statusInk,"status bar renders light Ready text");
+            check(SynMPTTheme::Color(COLOR_ACTIVECAPTION)==SynMPTTheme::Color(COLOR_INACTIVECAPTION)
+                && GetRValue(SynMPTTheme::Color(COLOR_ACTIVECAPTION))>=40,"active/inactive captions share the lighter gray");
+            struct SurfaceSearch{HWND owner;HWND surfaces[2]{};} search{source};
+            ::EnumChildWindows(host,[](HWND child,LPARAM parameter)->BOOL{
+                auto &found=*reinterpret_cast<SurfaceSearch *>(parameter);wchar_t cls[64]{};::GetClassNameW(child,cls,64);
+                if(std::wstring(cls)==L"SynMPT.ScrollSurface" && reinterpret_cast<HWND>(::GetWindowLongPtr(child,GWLP_USERDATA))==found.owner)
+                {const int axis=::GetDlgCtrlID(child)-0x7A10;if(axis>=0 && axis<2)found.surfaces[axis]=child;}return TRUE;
+            },reinterpret_cast<LPARAM>(&search));
+            for(auto surface:search.surfaces)
+            {
+                check(surface && ::IsWindow(surface),"each viewport scrollbar has its own persistent paint surface");
+                check(::SendMessage(surface,WM_NCHITTEST,0,0)==HTTRANSPARENT,"scroll surface passes mouse hit testing to the native scrollbar");
+                ::SendMessage(surface,WM_PRINTCLIENT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT);::GdiFlush();
+                check(::GetPixel(dc,0,0)==SynMPTTheme::Color(COLOR_APPWORKSPACE),"scroll surface paints its dark gutter");
+            }
+            // Native activation/range updates keep the same surfaces and full 32-bit positions.
+            for(int position:{123456,800000})
+            {
+                range.nPos=position;::SetScrollInfo(source,SB_VERT,&range,TRUE);::SendMessage(source,WM_NCACTIVATE,TRUE,0);::SendMessage(source,WM_SIZE,0,MAKELPARAM(200,70));
+                SCROLLINFO actual{};actual.cbSize=sizeof(actual);actual.fMask=SIF_POS;::GetScrollInfo(source,SB_VERT,&actual);
+                check(actual.nPos==position && ::IsWindow(search.surfaces[1]),"native redraw/range changes retain the persistent surface and 32-bit position");
+            }
+            ::DestroyWindow(source);check(!::IsWindow(search.surfaces[0]) && !::IsWindow(search.surfaces[1]),"scroll surfaces are destroyed with their viewport");
+            ::SelectObject(dc,previous);::DeleteObject(bitmap);::DeleteDC(dc);::DestroyWindow(host);
+            log<<"PASS: plain disabled labels, readable status text, gray captions, persistent scrollbar surfaces, native hit-test passthrough, redraw lifecycle and 32-bit ranges\n";
+        }
         PatternFont::UpdateFont(nullptr);
         check(PatternFont::currentFont && PatternFont::currentFont->dib && PatternFont::currentFont->dib->antialiased,"modern pattern font builds a coverage atlas");
         log<<"PASS: track tint ownership, selection and syntax colors, antialiased glyph compositing, active M/S/record buttons, modern pattern font and rounded/hover/disabled scrollbar skin\n";
