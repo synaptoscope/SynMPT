@@ -9,6 +9,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "tuningRatioMapWnd.h"
 #include "HighDPISupport.h"
 #include "Mainfrm.h"
@@ -45,9 +46,9 @@ void CTuningRatioMapWnd::OnPaint()
 	CRect rcClient;
 	GetClientRect(&rcClient);
 	
-	const auto colorText = GetSysColor(COLOR_WINDOWTEXT);
-	const auto colorTextSel = GetSysColor(COLOR_HIGHLIGHTTEXT);
-	const auto highlightBrush = GetSysColorBrush(COLOR_HIGHLIGHT), windowBrush = GetSysColorBrush(COLOR_WINDOW);
+	const auto colorText = SynMPTTheme::Color(COLOR_WINDOWTEXT);
+	const auto colorTextSel = SynMPTTheme::Color(COLOR_HIGHLIGHTTEXT);
+	const auto highlightBrush = SynMPTTheme::Brush(COLOR_HIGHLIGHT), windowBrush = SynMPTTheme::Brush(COLOR_WINDOW);
 	const int lineWidth = HighDPISupport::ScalePixels(1, *this);
 
 	if(int dpi = HighDPISupport::GetDpiForWindow(m_hWnd); m_dpi != dpi)
@@ -119,7 +120,7 @@ void CTuningRatioMapWnd::OnPaint()
 		if (ypaint < rcClient.bottom)
 		{
 			rect.SetRect(rcClient.left, ypaint, rcClient.right, rcClient.bottom);
-			FillRect(dc, &rect, GetSysColorBrush(COLOR_BTNFACE));
+			FillRect(dc, &rect, SynMPTTheme::Brush(COLOR_BTNFACE));
 		}
 	}
 	dc.SelectObject(oldFont);

@@ -501,6 +501,7 @@ protected:
 	afx_msg void OnBringTransportHere();
 	afx_msg void OnDockTransport();
 	void ShowTransport(bool resetPosition);
+    bool m_transportWanted = true;
 
 	afx_msg void OnCreateMixerDump();
 	afx_msg void OnVerifyMixerDump();

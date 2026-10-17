@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "View_pat.h"
 #include "dlg_misc.h"
 #include "EffectVis.h"
@@ -555,22 +556,13 @@ void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth
 {
 	const auto &settings = GetSoundFile()->ChnSettings[channel];
 	auto muteRect = GetTrackControlRect(channel, DragItem::ChannelMute);
-	DrawButtonRect(dc, lineWidth, muteRect, "M", false,
-		settings.dwFlags[CHN_MUTE] || (m_bInItemRect && m_nDragItem == DragItem(DragItem::ChannelMute, channel)));
+    SynMPTTheme::DrawAction(dc, muteRect, L"M", RGB(104,169,224), settings.dwFlags[CHN_MUTE]);
 	auto soloRect = GetTrackControlRect(channel, DragItem::ChannelSolo);
 	const bool solo = IsTrackSolo(channel);
-	DrawButtonRect(dc, lineWidth, soloRect, "", false,
-		solo || (m_bInItemRect && m_nDragItem == DragItem(DragItem::ChannelSolo, channel)));
-	const auto oldSoloFont = ::SelectObject(dc, CMainFrame::GetGUIFont());
-	const auto oldSoloColor = ::SetTextColor(dc, solo ? RGB(176, 36, 36) : GetSysColor(COLOR_BTNTEXT));
-	const int oldSoloMode = ::SetBkMode(dc, TRANSPARENT);
-	::DrawTextA(dc, "S", 1, &soloRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-	::SetBkMode(dc, oldSoloMode);
-	::SetTextColor(dc, oldSoloColor);
-	::SelectObject(dc, oldSoloFont);
+    SynMPTTheme::DrawAction(dc, soloRect, L"S", RGB(222,191,79), solo);
 	const auto record = GetDocument()->GetChannelRecordGroup(channel);
 	auto recordRect = GetTrackControlRect(channel, DragItem::ChannelRecord);
-	DrawButtonRect(dc, lineWidth, recordRect, record == RecordGroup::Group2 ? "R2" : "R", false, record != RecordGroup::NoGroup || IsCompositeTrackArmed(channel));
+    SynMPTTheme::DrawAction(dc, recordRect, L"", RGB(198,58,80), record != RecordGroup::NoGroup || IsCompositeTrackArmed(channel), true);
 	auto routeRect = GetTrackControlRect(channel, DragItem::ChannelRouting);
 	CString route = settings.isBus ? _T("Bus") : _T("Out");
 	if(settings.parentBus < GetSoundFile()->GetNumChannels()) route = mpt::ToCString(GetSoundFile()->GetCharsetInternal(), GetSoundFile()->ChnSettings[settings.parentBus].szName.buf);
@@ -591,7 +583,7 @@ void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth
 		const bool volume = type == DragItem::ChannelVolume;
 		const int value = volume ? settings.nVolume : settings.nPan;
 		const int range = volume ? 64 : 256;
-		const auto color = GetSysColor(enabled ? COLOR_BTNTEXT : COLOR_GRAYTEXT);
+		const auto color = SynMPTTheme::Color(enabled ? COLOR_BTNTEXT : COLOR_GRAYTEXT);
 		::SetTextColor(dc, color);
 		if(slider.left - row.left >= MulDiv(12, m_dpi, 96))
 		{
@@ -607,7 +599,7 @@ void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth
 		}
 		const int middle = (slider.top + slider.bottom) / 2;
 		CRect rail(slider.left, middle - lineWidth, slider.right, middle + lineWidth);
-		::SetDCBrushColor(dc, GetSysColor(COLOR_BTNSHADOW));
+		::SetDCBrushColor(dc, SynMPTTheme::Color(COLOR_BTNSHADOW));
 		::FillRect(dc, rail, brush);
 		if(!volume)
 		{
@@ -653,8 +645,8 @@ void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
 			auto rect = GetAutomationRect(channel, lane);
 			if(rect.Width() <= 0 || rect.left >= client.right) continue;
 			const bool pan = lane == AutomationLane::Pan;
-			const COLORREF color = pan ? RGB(204,112,34) : RGB(36,142,76);
-			const COLORREF background = pan ? RGB(247,238,224) : RGB(230,242,232);
+			const COLORREF color = pan ? RGB(228,166,104) : RGB(124,201,155);
+			const COLORREF background = SynMPTTheme::Mix(SynMPTTheme::Color(COLOR_WINDOW), color, 12);
 			if(headers)
 			{
                 rect.bottom = m_szHeader.cy;
@@ -667,17 +659,17 @@ void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
                 rect.DeflateRect(lineWidth * 2, lineWidth);
                 rect.right -= shape.corner;
                 const auto font = ::SelectObject(dc, CMainFrame::GetGUIFont());
-                ::SetTextColor(dc, GetSysColor(COLOR_BTNTEXT)); ::SetBkMode(dc, TRANSPARENT);
+                ::SetTextColor(dc, SynMPTTheme::Color(COLOR_BTNTEXT)); ::SetBkMode(dc, TRANSPARENT);
                 ::DrawTextA(dc, pan ? "Pan <" : "Vol <", -1, rect, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
                 ::SelectObject(dc, font); ::RestoreDC(dc, saved);
-                DrawTrackOutline(dc, shape, GetSysColor(COLOR_BTNSHADOW));
+                DrawTrackOutline(dc, shape, SynMPTTheme::Color(COLOR_BTNSHADOW));
 				continue;
 			}
 			rect.top = m_szHeader.cy;
 			const int saved = ::SaveDC(dc);
 			::IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
 			::SetDCBrushColor(dc, background); ::FillRect(dc, rect, GetStockBrush(DC_BRUSH));
-			::SetDCPenColor(dc, GetSysColor(COLOR_BTNSHADOW));
+			::SetDCPenColor(dc, SynMPTTheme::Color(COLOR_BTNSHADOW));
 			::MoveToEx(dc, rect.left, rect.top, nullptr); ::LineTo(dc, rect.left, rect.bottom);
 			::MoveToEx(dc, rect.right - 1, rect.top, nullptr); ::LineTo(dc, rect.right - 1, rect.bottom);
 			const int width = std::max(static_cast<int>(rect.Width()) - pad * 2 - 1, 1);
@@ -693,7 +685,7 @@ void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
 				const int y = m_szHeader.cy + (static_cast<int>(row) - GetYScrollPos() + static_cast<int>(m_nMidRow)) * GetRowHeight() - GetSmoothScrollOffset() + GetRowHeight() / 2;
 				if(y < rect.top) { lastX = x; continue; }
 				if(y > rect.bottom + GetRowHeight()) break;
-				::SetDCPenColor(dc,row % std::max<ROWINDEX>(GetRowsPerBeat(),1) == 0 ? RGB(184,193,184) : RGB(217,221,213));
+				::SetDCPenColor(dc,row % std::max<ROWINDEX>(GetRowsPerBeat(),1) == 0 ? RGB(70,76,83) : RGB(51,57,64));
 				::MoveToEx(dc,rect.left+1,y-GetRowHeight()/2,nullptr); ::LineTo(dc,rect.right-1,y-GetRowHeight()/2);
 				::SetDCPenColor(dc,color); ::MoveToEx(dc,lastX,lastY,nullptr); ::LineTo(dc,lastX,y); ::LineTo(dc,x,y);
 
@@ -733,7 +725,7 @@ void CViewPattern::DrawAutomationLanes(HDC dc, bool headers, int lineWidth)
 			if(m_nPlayPat == m_nPattern && CMainFrame::GetMainFrame()->GetModPlaying() == GetDocument())
 			{
 				const int y = m_szHeader.cy + (static_cast<int>(m_nPlayRow)-GetYScrollPos()+static_cast<int>(m_nMidRow))*GetRowHeight()-GetSmoothScrollOffset();
-				::SetDCPenColor(dc,GetSysColor(COLOR_HIGHLIGHT)); ::MoveToEx(dc,rect.left,y,nullptr); ::LineTo(dc,rect.right,y);
+				::SetDCPenColor(dc,SynMPTTheme::Color(COLOR_HIGHLIGHT)); ::MoveToEx(dc,rect.left,y,nullptr); ::LineTo(dc,rect.right,y);
 			}
 			::RestoreDC(dc,saved);
 		}
@@ -802,9 +794,9 @@ void CViewPattern::OnDraw(CDC *pDC)
 	HBITMAP oldBitmap = SelectBitmap(m_offScreenDC, m_offScreenBitmap);
 
 	const auto dcBrush = GetStockBrush(DC_BRUSH);
-	const auto faceColor = GetSysColor(COLOR_BTNFACE);
-	const auto shadowColor = GetSysColor(COLOR_BTNSHADOW);
-	const auto textColor = GetSysColor(COLOR_BTNTEXT);
+	const auto faceColor = SynMPTTheme::Color(COLOR_BTNFACE);
+	const auto shadowColor = SynMPTTheme::Color(COLOR_BTNSHADOW);
+	const auto textColor = SynMPTTheme::Color(COLOR_BTNTEXT);
 
 	CHANNELINDEX xofs = static_cast<CHANNELINDEX>(GetXScrollPos());
 	ROWINDEX yofs = static_cast<ROWINDEX>(GetYScrollPos());
@@ -924,7 +916,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 	DrawAutomationLanes(hdc, false, lineWidth);
     // Carry each outline down to the common end of the visible pattern.
     const auto borderPen = ::SelectObject(hdc, GetStockObject(DC_PEN));
-    const auto borderColor = ::SetDCPenColor(hdc, GetSysColor(COLOR_BTNSHADOW));
+    const auto borderColor = ::SetDCPenColor(hdc, SynMPTTheme::Color(COLOR_BTNSHADOW));
     for(CHANNELINDEX channel = xofs; channel < numChannels; channel++)
     {
         if(!IsTrackVisible(channel)) continue;
@@ -939,7 +931,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 	if(pDC->RectVisible(rect))
 	{
         // Clear old caps as folders collapse, reorder or change depth.
-        ::FillRect(m_offScreenDC, rect, GetSysColorBrush(COLOR_APPWORKSPACE));
+        ::FillRect(m_offScreenDC, rect, SynMPTTheme::Brush(COLOR_APPWORKSPACE));
 		sprintf(s, "#%u", m_nPattern);
 		rect.right = m_szHeader.cx;
 		if(pDC->RectVisible(rect))
@@ -974,7 +966,9 @@ void CViewPattern::OnDraw(CDC *pDC)
                 rect.top = GetTrackHeaderTop(static_cast<CHANNELINDEX>(chn));
                 const auto shape = GetTrackOutline(static_cast<CHANNELINDEX>(chn), m_szHeader.cy);
                 const int shapeClip = ClipTrackOutline(m_offScreenDC, shape);
-				DrawButtonRect(m_offScreenDC, lineWidth, rect, "");
+                const auto trackBackground = channel.color == ModChannelSettings::INVALID_COLOR ? SynMPTTheme::Color(COLOR_BTNFACE)
+                    : SynMPTTheme::Mix(SynMPTTheme::Color(COLOR_BTNFACE), channel.color, 18);
+                ::SetDCBrushColor(m_offScreenDC, trackBackground); ::FillRect(m_offScreenDC, rect, dcBrush);
 				auto nameRect = GetTrackControlRect(static_cast<CHANNELINDEX>(chn), DragItem::ChannelHeader);
                 const auto fullNameRect = nameRect;
                 if(channel.isBus)
@@ -992,7 +986,7 @@ void CViewPattern::OnDraw(CDC *pDC)
                 label.top += chanColorHeight;
                 if(pushed) label.OffsetRect(lineWidth, lineWidth);
                 const auto nameFont = ::SelectObject(m_offScreenDC, CMainFrame::GetGUIFont());
-                ::SetTextColor(m_offScreenDC, GetSysColor(channel.dwFlags[CHN_MUTE] ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
+                ::SetTextColor(m_offScreenDC, SynMPTTheme::Color(channel.dwFlags[CHN_MUTE] ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
                 ::SetBkMode(m_offScreenDC, TRANSPARENT);
                 ::DrawTextA(m_offScreenDC, s, -1, label, DT_SINGLELINE | DT_NOPREFIX | DT_CENTER | DT_END_ELLIPSIS);
                 ::SelectObject(m_offScreenDC, nameFont);
@@ -1030,7 +1024,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 				nameRect = fullNameRect;
 				if(m_trackSelection.Contains(chn))
 				{
-					::SetDCBrushColor(m_offScreenDC, GetSysColor(COLOR_HIGHLIGHT));
+					::SetDCBrushColor(m_offScreenDC, SynMPTTheme::Color(COLOR_HIGHLIGHT));
 					CRect edge(nameRect.left, nameRect.bottom - lineWidth * 2, nameRect.right, nameRect.bottom);
 					::FillRect(m_offScreenDC, edge, dcBrush);
 					edge.SetRect(nameRect.left, nameRect.top + chanColorHeight, nameRect.left + lineWidth, nameRect.bottom);
@@ -1043,7 +1037,7 @@ void CViewPattern::OnDraw(CDC *pDC)
                 if(channel.parentBus < numChannels)
                 {
                     const auto color = sndFile.ChnSettings[channel.parentBus].color;
-                    ::SetDCBrushColor(m_offScreenDC, color == ModChannelSettings::INVALID_COLOR ? GetSysColor(COLOR_HIGHLIGHT) : color);
+                    ::SetDCBrushColor(m_offScreenDC, color == ModChannelSettings::INVALID_COLOR ? SynMPTTheme::Color(COLOR_HIGHLIGHT) : color);
                     CRect familyEdge(rect.left, nameRect.bottom, rect.left + lineWidth * 2, GetTrackControlsBottom(static_cast<CHANNELINDEX>(chn)));
                     ::FillRect(m_offScreenDC, familyEdge, dcBrush);
                 }
@@ -1066,7 +1060,7 @@ void CViewPattern::OnDraw(CDC *pDC)
 						m_bInItemRect && (m_nDragItem.Type() == DragItem::PluginName) && (m_nDragItem.Value() == chn), DT_CENTER);
 				}
                 ::RestoreDC(m_offScreenDC, shapeClip);
-                DrawTrackOutline(m_offScreenDC, shape, GetSysColor(COLOR_BTNSHADOW));
+                DrawTrackOutline(m_offScreenDC, shape, SynMPTTheme::Color(COLOR_BTNSHADOW));
 			} else
 			{
 				break;
@@ -1272,6 +1266,7 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 		// Optimization: same row color ?
 		const bool useSpeedUpMask = (oldrowcolor == EncodeRowColor(row_bkcol, row_col, bRowSel)) && !blendModeChanged;
 		xbmp = nbmp = 0;
+        const auto firstDrawnChannel = col;
 		do
 		{
 			if(!IsTrackVisible(static_cast<CHANNELINDEX>(col))) continue;
@@ -1509,7 +1504,16 @@ void CViewPattern::DrawPatternData(HDC hdc, const int lineWidth, PATTERNINDEX nP
 			xpaint += GetTrackWidth(static_cast<CHANNELINDEX>(col));
 			if ((xbmp + nColumnWidth >= (UINT)m_Dib.GetWidth()) || (xpaint >= rcClient.right)) break;
 		} while (++col < maxcol);
-		m_Dib.Blit(hdc, xpaint-xbmp, ypaint, std::min(xbmp, static_cast<UINT>(m_Dib.GetWidth())), m_szCell.cy);
+        std::vector<BitmapTintSpan> tints;
+        int tintLeft = 0;
+        for(CHANNELINDEX channel = static_cast<CHANNELINDEX>(firstDrawnChannel); channel <= col && channel < ncols; channel++)
+        {
+            const auto color = sndFile.ChnSettings[channel].color;
+            if(IsTrackVisible(channel) && color != ModChannelSettings::INVALID_COLOR)
+                tints.push_back({tintLeft, tintLeft + GetNoteTrackWidth(channel), color});
+            tintLeft += GetTrackWidth(channel);
+        }
+		m_Dib.Blit(hdc, xpaint-xbmp, ypaint, std::min(xbmp, static_cast<UINT>(m_Dib.GetWidth())), m_szCell.cy, tints);
 		// skip row
 		ypaint += m_szCell.cy;
 		if (ypaint >= rcClient.bottom) break;
@@ -2212,10 +2216,10 @@ void CViewPattern::CreateVUMeterBitmap()
 
 	m_vuMeterBitmap.CreateCompatibleBitmap(dc, bmpWidth, bmpHeight);
 	const auto oldBitmap = m_vuMeterDC.SelectObject(m_vuMeterBitmap);
-	m_vuMeterDC.FillSolidRect(0, 0, bmpWidth, bmpHeight, GetSysColor(COLOR_BTNFACE));
+	m_vuMeterDC.FillSolidRect(0, 0, bmpWidth, bmpHeight, SynMPTTheme::Color(COLOR_BTNFACE));
 
 	const auto &Colors = TrackerSettings::Instance().rgbCustomColors;
-	const COLORREF shadowColor = (m_ledWidth > 2) ? RGB(0, 0, 0) : GetSysColor(COLOR_BTNSHADOW);
+	const COLORREF shadowColor = (m_ledWidth > 2) ? RGB(0, 0, 0) : SynMPTTheme::Color(COLOR_BTNSHADOW);
 
 	// 0: sample-based, 1: synthesized / plugin
 	for(int colorScheme = 0; colorScheme < 2; colorScheme++)

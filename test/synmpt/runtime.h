@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #pragma once
 #include "../../soundlib/Sndfile.h"
+#include "../../mptrack/SynMPTTheme.h"
+#include "../../mptrack/PatternFont.h"
 #include "../../soundlib/TrackRouting.h"
 #include "../../soundlib/CompositeInput.h"
 #include "mpt/io_file/fstream.hpp"
@@ -31,6 +33,44 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
     mpt::IO::ofstream log(directory + P_("synmpt-runtime-checks.log"),std::ios::binary);
     try {
         auto check=[](bool pass,const char *why){if(!pass) throw std::runtime_error(why);};
+        // These render into an owned memory bitmap; no desktop screenshot or user file is read.
+        {
+            BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth=32;info.bmiHeader.biHeight=-24;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+            void *pixels=nullptr;const auto dc=::CreateCompatibleDC(nullptr);
+            const auto bitmap=::CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
+            check(dc && bitmap && pixels,"appearance memory bitmap allocation");
+            const auto oldBitmap=::SelectObject(dc,bitmap);
+            const auto pixel=[&](int x,int y){return ::GetPixel(dc,x,y);};
+            CFastBitmap image;image.Init();image.SetSize(8,2);
+            image.SetColor(MODCOLOR_BACKNORMAL,RGB(40,40,40));image.SetColor(MODCOLOR_NOTE,RGB(220,220,220));
+            image.SetColor(MODCOLOR_BACKSELECTED,RGB(60,100,140));image.FillRect(0,0,8,2,MODCOLOR_BACKNORMAL);
+            const std::vector<BitmapTintSpan> tints{{0,4,RGB(220,60,60)}};
+            image.Blit(dc,0,0,8,2,tints);::GdiFlush();
+            check(GetRValue(pixel(0,0))>40 && pixel(4,0)==RGB(40,40,40),"track tint stays inside its owning column");
+            image.FillRect(0,0,4,1,MODCOLOR_BACKSELECTED);image.Blit(dc,0,0,8,2,tints);::GdiFlush();
+            check(pixel(0,0)==RGB(60,100,140),"selected cells retain their selection color over track tint");
+            uint8 glyphPixels[]{0x08,0xFF};MODPLUGDIB glyph{};glyph.bmiHeader.biWidth=4;glyph.bmiHeader.biHeight=-1;
+            glyph.lpDibBits=glyphPixels;glyph.antialiased=true;
+            image.SetTextColor(MODCOLOR_NOTE,MODCOLOR_BACKNORMAL);image.TextBlt(0,0,4,1,0,0,&glyph);
+            image.Blit(dc,0,0,8,2,tints);::GdiFlush();
+            check(pixel(0,0)==RGB(220,220,220),"syntax-colored text is not recolored by track tint");
+            check(GetRValue(pixel(1,0))>GetRValue(pixel(2,0)) && GetRValue(pixel(1,0))<220,"glyph edges blend against the tinted track background");
+            image.FillRect(0,0,4,1,MODCOLOR_BACKNORMAL);image.Blit(dc,0,0,8,2);::GdiFlush();
+            check(pixel(1,0)==RGB(40,40,40),"redrawing a cell clears old glyph coverage");
+            RECT action{0,0,32,24};SynMPTTheme::DrawAction(dc,action,L"M",RGB(104,169,224),true);::GdiFlush();
+            check(pixel(3,3)==RGB(104,169,224),"mute fills the whole active button blue");
+            SynMPTTheme::DrawAction(dc,action,L"S",RGB(222,191,79),true);::GdiFlush();
+            check(pixel(3,3)==RGB(222,191,79),"solo fills the whole active button yellow");
+            SynMPTTheme::DrawAction(dc,action,L"",RGB(198,58,80),true,true);::GdiFlush();
+            check(pixel(3,3)==RGB(198,58,80) && pixel(16,12)==RGB(255,237,239),"armed record has a red body and round contrasting dot");
+            SynMPTTheme::DrawAction(dc,action,L"",RGB(198,58,80),false,true);::GdiFlush();
+            check(pixel(3,3)==SynMPTTheme::Color(COLOR_BTNFACE) && pixel(16,12)==RGB(174,53,70),"unarmed record retains its red dot on the neutral button");
+            ::SelectObject(dc,oldBitmap);::DeleteObject(bitmap);::DeleteDC(dc);
+        }
+        PatternFont::UpdateFont(nullptr);
+        check(PatternFont::currentFont && PatternFont::currentFont->dib && PatternFont::currentFont->dib->antialiased,"modern pattern font builds a coverage atlas");
+        log<<"PASS: track tint ownership, selection and syntax colors, antialiased glyph compositing, active M/S/record buttons and modern pattern font\n";
         auto file=std::make_unique<Fixture>();
         file->m_nSamples=2;
         file->Patterns.Insert(0,64);file->Patterns.Insert(1,64);

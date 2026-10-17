@@ -9,6 +9,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "Mainfrm.h"
 #include "AdvancedConfigDlg.h"
 #include "AutoSaver.h"
@@ -260,6 +261,7 @@ void CMainFrame::Initialize()
 	RemoveControlBar(&m_wndStatusBar);
 	RemoveControlBar(&m_wndDocumentTabs);
 	LoadBarState(_T("Toolbars"));
+    SynMPTTheme::RegisterWindow(m_hWnd);
 	AddControlBar(&m_wndDocumentTabs);
 	AddControlBar(&m_wndStatusBar);
 
@@ -307,9 +309,9 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 
 	RecreateImageLists();
 
-	penDarkGray = ::CreatePen(PS_SOLID, 0, GetSysColor(COLOR_BTNSHADOW));
+	penDarkGray = ::CreatePen(PS_SOLID, 0, SynMPTTheme::Color(COLOR_BTNSHADOW));
 	penGray99 = ::CreatePen(PS_SOLID, 0, RGB(0x99, 0x99, 0x99));
-	penHalfDarkGray = ::CreatePen(PS_DOT, 0, GetSysColor(COLOR_BTNSHADOW));
+	penHalfDarkGray = ::CreatePen(PS_DOT, 0, SynMPTTheme::Color(COLOR_BTNSHADOW));
 
 	// Cursors
 	curDragging = theApp.LoadCursor(IDC_DRAGGING);
@@ -587,6 +589,7 @@ void CMainFrame::OnActivateApp(BOOL active, DWORD threadID)
 	if(active)
 		IPCWindow::UpdateLastUsed();
 	CMDIFrameWnd::OnActivateApp(active, threadID);
+    if(active && m_transportWanted && m_wndTransport.m_hWnd && !IsIconic()) ShowTransport(false);
 }
 
 
@@ -652,6 +655,7 @@ LRESULT CALLBACK CMainFrame::FocusChangeProc(int code, WPARAM wParam, LPARAM lPa
 
 BOOL CMainFrame::PreTranslateMessage(MSG *pMsg)
 {
+    if(SynMPTTheme::HandleTransportKey(*pMsg)) return TRUE;
 	// Right-click menu to disable/enable tree view and main toolbar when right-clicking on either the menu strip or main toolbar
 	if((pMsg->message == WM_RBUTTONUP) || (pMsg->message == WM_NCRBUTTONUP))
 	{
@@ -2085,7 +2089,9 @@ class CPropertySheetMPT : public CPropertySheet
 	BOOL OnInitDialog() override
 	{
 		ModifyStyleEx(0, WS_EX_CONTEXTHELP);
-		return CPropertySheet::OnInitDialog();
+		const BOOL result = CPropertySheet::OnInitDialog();
+        SynMPTTheme::RegisterWindow(m_hWnd);
+        return result;
 	}
 
 	afx_msg void OnSysCommand(UINT id, LPARAM param)
@@ -2749,9 +2755,12 @@ void CMainFrame::OnRButtonDown(UINT, CPoint pt)
 void CMainFrame::OnViewTransport()
 {
 	if(m_wndTransport.IsWindowVisible())
+    {
+        m_transportWanted = false;
 		ShowControlBar(&m_wndTransport, FALSE, FALSE);
+    }
 	else
-		ShowTransport(false);
+		ShowTransport(true);
 }
 
 
@@ -2784,6 +2793,7 @@ void CMainFrame::OnDockTransport()
 
 void CMainFrame::ShowTransport(bool resetPosition)
 {
+    m_transportWanted = true;
 	// A transport with all of its button groups hidden cannot be recovered visibly.
 	FlagSet<MainToolBarItem> items = TrackerSettings::Instance().mainToolBarVisibleItems.Get();
 	if(!items[MainToolBarItem::IconsPlayback])
@@ -2796,7 +2806,7 @@ void CMainFrame::ShowTransport(bool resetPosition)
 	CRect barRect;
 	m_wndTransport.GetWindowRect(barRect);
 	const bool offScreen = m_wndTransport.IsFloating() && !::MonitorFromRect(barRect, MONITOR_DEFAULTTONULL);
-	if(resetPosition || offScreen)
+	if(resetPosition || offScreen || !m_wndTransport.IsFloating())
 	{
 		CRect frameRect;
 		GetWindowRect(frameRect);
@@ -2807,11 +2817,29 @@ void CMainFrame::ShowTransport(bool resetPosition)
 			std::max(static_cast<int>(monitor.rcWork.left) + padding, static_cast<int>(monitor.rcWork.right - barRect.Width()) - padding));
 		const int y = Clamp(static_cast<int>(frameRect.top) + padding * 6, static_cast<int>(monitor.rcWork.top) + padding,
 			std::max(static_cast<int>(monitor.rcWork.top) + padding, static_cast<int>(monitor.rcWork.bottom - barRect.Height()) - padding * 2));
-		FloatControlBar(&m_wndTransport, CPoint(x, y));
+        CPoint position(x, y);
+        if(resetPosition)
+        {
+            CPoint cursor; ::GetCursorPos(&cursor);
+            if(frameRect.PtInRect(cursor))
+            {
+                position.x = Clamp(static_cast<int>(cursor.x) - barRect.Width() / 2, static_cast<int>(monitor.rcWork.left) + padding,
+                    std::max(static_cast<int>(monitor.rcWork.left) + padding, static_cast<int>(monitor.rcWork.right - barRect.Width()) - padding));
+                position.y = Clamp(static_cast<int>(cursor.y) + padding * 2, static_cast<int>(monitor.rcWork.top) + padding,
+                    std::max(static_cast<int>(monitor.rcWork.top) + padding, static_cast<int>(monitor.rcWork.bottom - barRect.Height()) - padding));
+            }
+        }
+		FloatControlBar(&m_wndTransport, position);
 	}
 	ShowControlBar(&m_wndTransport, TRUE, FALSE);
+    m_wndTransport.LockFloatingFrame();
 	if(m_wndTransport.IsFloating())
-		m_wndTransport.GetParentFrame()->ShowWindow(SW_SHOWNOACTIVATE);
+    {
+        auto *floating = m_wndTransport.GetParentFrame();
+        floating->ShowWindow(SW_SHOWNOACTIVATE);
+        floating->SetWindowPos(&wndTop, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SynMPTTheme::RegisterWindow(floating->m_hWnd);
+    }
 	RecalcLayout();
 }
 
@@ -2829,9 +2857,7 @@ void CMainFrame::ShowToolbarMenu(CPoint screenPt)
 void CMainFrame::AddToolBarMenuEntries(CMenu &menu) const
 {
 	menu.AppendMenu(MF_STRING, ID_VIEW_TOOLBAR, m_InputHandler->GetMenuText(ID_VIEW_TOOLBAR));
-	menu.AppendMenu(MF_STRING, ID_VIEW_TRANSPORT, _T("&Transport"));
-	menu.AppendMenu(MF_STRING, ID_TRANSPORT_BRING_HERE, _T("Bring Transport &Here"));
-	menu.AppendMenu(MF_STRING, ID_TRANSPORT_DOCK, _T("Dock Transport Beside Toolbar"));
+	menu.AppendMenu(MF_STRING, ID_VIEW_TRANSPORT, _T("&Floating Transport\tT"));
 	menu.AppendMenu(MF_STRING, IDD_TREEVIEW, m_InputHandler->GetMenuText(IDD_TREEVIEW));
 	menu.AppendMenu(MF_STRING | (TrackerSettings::Instance().treeViewOnLeft ? MF_CHECKED : 0), ID_TREEVIEW_ON_LEFT, _T("Tree View on &Left"));
 
@@ -3084,12 +3110,8 @@ void CMainFrame::OnShowWindow(BOOL bShow, UINT /*nStatus*/)
 		wpl = theApp.GetSettings().Read<WINDOWPLACEMENT>(U_("Display"), U_("WindowPlacement"), wpl);
 		HighDPISupport::SetWindowPlacement(m_hWnd, wpl);
 
-        // Migrate the older two-row/floating default once, then retain user placement.
-        if(theApp.GetProfileInt(_T("Toolbars"), _T("SynMPTDocumentWorkspace"), 0) < 1)
-        {
-            OnDockTransport();
-            theApp.WriteProfileInt(_T("Toolbars"), _T("SynMPTDocumentWorkspace"), 1);
-        }
+        // A floating transport is always recoverable; old docked states migrate here.
+        ShowTransport(!m_wndTransport.IsFloating());
 	}
 }
 

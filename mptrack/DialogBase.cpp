@@ -9,6 +9,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "DialogBase.h"
 #include "HighDPISupport.h"
 #include "InputHandler.h"
@@ -28,6 +29,7 @@ END_MESSAGE_MAP()
 BOOL DialogBase::OnInitDialog()
 {
 	UpdateDPI();
+	SynMPTTheme::RegisterWindow(m_hWnd);
 	EnableToolTips();
 	return CDialog::OnInitDialog();
 }
@@ -52,6 +54,7 @@ BOOL DialogBase::PreTranslateMessage(MSG *pMsg)
 
 bool DialogBase::HandleGlobalKeyMessage(const MSG &msg)
 {
+    if(SynMPTTheme::HandleTransportKey(msg)) return true;
 	// We handle keypresses before Windows has a chance to handle them (for alt etc..)
 	if(msg.message == WM_KEYDOWN || msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP || msg.message == WM_SYSKEYDOWN)
 	{

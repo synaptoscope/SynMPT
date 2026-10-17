@@ -9,6 +9,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "ColorPickerButton.h"
 #include "HighDPISupport.h"
 #include "Sndfile.h"
@@ -105,7 +106,7 @@ void ColorPickerButton::DrawItem(DRAWITEMSTRUCT *dis)
 	::DrawEdge(hdc, rect, (dis->itemState & ODS_SELECTED) ? BDR_SUNKENINNER : BDR_RAISEDINNER, BF_RECT | BF_ADJUST);
 	if(m_color == ModChannelSettings::INVALID_COLOR || (dis->itemState & ODS_DISABLED))
 	{
-		::FillRect(hdc, rect, GetSysColorBrush(COLOR_BTNFACE));
+		::FillRect(hdc, rect, SynMPTTheme::Brush(COLOR_BTNFACE));
 	} else
 	{
 		::SetDCBrushColor(hdc, m_color);

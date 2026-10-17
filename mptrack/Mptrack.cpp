@@ -9,6 +9,10 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
+#include <map>
+#include <uxtheme.h>
+#pragma comment(lib, "uxtheme.lib")
 #include "Mptrack.h"
 #include "AboutDialog.h"
 #include "AutoSaver.h"
@@ -2079,9 +2083,16 @@ static void TimeoutSplashScreen()
 /////////////////////////////////////////////////////////////////////////////
 // Idle-time processing
 
+BOOL CTrackApp::PreTranslateMessage(MSG *message)
+{
+    if(message && SynMPTTheme::HandleTransportKey(*message)) return TRUE;
+    return CWinApp::PreTranslateMessage(message);
+}
+
 BOOL CTrackApp::OnIdle(LONG lCount)
 {
 	BOOL b = CWinApp::OnIdle(lCount);
+    SynMPTTheme::RefreshWindows();
 
 	TimeoutSplashScreen();
 
@@ -2175,25 +2186,15 @@ int DrawTextT(HDC hdc, const char *lpchText, int cchText, LPRECT lprc, UINT form
 template<typename Tchar>
 static void DrawButtonRectImpl(HDC hdc, int lineWidth, HFONT font, CRect rect, const Tchar *text, bool disabled, bool pushed, DWORD textFlags, uint32 topMargin)
 {
-	if(lineWidth != 1)
-	{
-		// Draw "real" buttons in Hi-DPI mode
-		DrawFrameControl(hdc, rect, DFC_BUTTON, pushed ? (DFCS_PUSHED | DFCS_BUTTONPUSH) : DFCS_BUTTONPUSH);
-	} else
-	{
-		const auto colorHighlight = GetSysColor(COLOR_BTNHIGHLIGHT), colorShadow = GetSysColor(COLOR_BTNSHADOW);
-		auto oldpen = SelectPen(hdc, GetStockObject(DC_PEN));
-		::SetDCPenColor(hdc, pushed ? colorShadow : colorHighlight);
-		::FillRect(hdc, rect, GetSysColorBrush(COLOR_BTNFACE));
-		::MoveToEx(hdc, rect.left, rect.bottom - 1, nullptr);
-		::LineTo(hdc, rect.left, rect.top);
-		::LineTo(hdc, rect.right - 1, rect.top);
-		::SetDCPenColor(hdc, pushed ? colorHighlight : colorShadow);
-		::LineTo(hdc, rect.right - 1, rect.bottom - 1);
-		::LineTo(hdc, rect.left, rect.bottom - 1);
-		SelectPen(hdc, oldpen);
-	}
-	
+    const auto colorHighlight = SynMPTTheme::Color(COLOR_BTNHIGHLIGHT), colorShadow = SynMPTTheme::Color(COLOR_BTNSHADOW);
+    auto oldpen = SelectPen(hdc, GetStockObject(DC_PEN));
+    ::SetDCPenColor(hdc, pushed ? colorShadow : colorHighlight);
+    ::SetDCBrushColor(hdc, SynMPTTheme::Color(pushed ? COLOR_HIGHLIGHT : COLOR_BTNFACE));
+    ::FillRect(hdc, rect, GetStockBrush(DC_BRUSH));
+    ::MoveToEx(hdc, rect.left, rect.bottom - 1, nullptr); ::LineTo(hdc, rect.left, rect.top); ::LineTo(hdc, rect.right - 1, rect.top);
+    ::SetDCPenColor(hdc, colorShadow); ::LineTo(hdc, rect.right - 1, rect.bottom - 1); ::LineTo(hdc, rect.left, rect.bottom - 1);
+    SelectPen(hdc, oldpen);
+
 	if(text && text[0])
 	{
 		rect.DeflateRect(lineWidth, lineWidth);
@@ -2202,7 +2203,7 @@ static void DrawButtonRectImpl(HDC hdc, int lineWidth, HFONT font, CRect rect, c
 			rect.top += lineWidth;
 			rect.left += lineWidth;
 		}
-		::SetTextColor(hdc, GetSysColor(disabled ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
+		::SetTextColor(hdc, SynMPTTheme::Color(disabled ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
 		::SetBkMode(hdc, TRANSPARENT);
 		rect.top += topMargin;
 		auto oldFont = SelectFont(hdc, font);
@@ -2325,8 +2326,45 @@ void CFastBitmap::Init(MODPLUGDIB *lpTextDib)
 }
 
 
-void CFastBitmap::Blit(HDC hdc, int x, int y, int cx, int cy)
+void CFastBitmap::Blit(HDC hdc, int x, int y, int cx, int cy, const std::vector<BitmapTintSpan> &tints)
 {
+    if(m_smoothUsed || !tints.empty())
+    {
+        cx = std::min(cx, static_cast<int>(m_Dib.bmiHeader.biWidth));
+        cy = std::min(cy, static_cast<int>(m_Dib.bmiHeader.biHeight));
+        if(cx <= 0 || cy <= 0) return;
+        m_rgbPixels.resize(static_cast<size_t>(cx) * cy);
+        const auto toColor = [&](unsigned index) { const auto &q = m_Dib.bmiColors[index]; return RGB(q.rgbRed, q.rgbGreen, q.rgbBlue); };
+        const auto isBackground = [](unsigned index) { index &= 0x7F; return index == MODCOLOR_BACKNORMAL || index == MODCOLOR_BACKHILIGHT || index == MODCOLOR_2NDHIGHLIGHT; };
+        const auto rgbPixel = [](COLORREF color) { return (GetRValue(color) << 16) | (GetGValue(color) << 8) | GetBValue(color); };
+        for(int row = 0; row < cy; row++)
+        {
+            size_t span = 0;
+            const size_t offset = (m_Dib.bmiHeader.biHeight - 1 - row) * m_Dib.bmiHeader.biWidth;
+            for(int col = 0; col < cx; col++)
+            {
+                while(span < tints.size() && col >= tints[span].right) span++;
+                const bool tinted = span < tints.size() && col >= tints[span].left;
+                const unsigned index = m_Dib.DibBits[offset + col];
+                auto color = toColor(index);
+                if(tinted && isBackground(index)) color = SynMPTTheme::Mix(color, tints[span].color, 16);
+                const auto coverage = m_coverage[offset + col];
+                if(coverage)
+                {
+                    const unsigned backgroundIndex = coverage >> 4;
+                    auto background = toColor(backgroundIndex);
+                    if(tinted && isBackground(backgroundIndex)) background = SynMPTTheme::Mix(background, tints[span].color, 16);
+                    color = SynMPTTheme::Mix(background, color, (coverage & 15) * 100 / 15);
+                }
+                m_rgbPixels[static_cast<size_t>(row) * cx + col] = rgbPixel(color);
+            }
+        }
+        BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = cx; info.bmiHeader.biHeight = -cy; info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+        ::SetDIBitsToDevice(hdc, x, y, cx, cy, 0, 0, 0, cy, m_rgbPixels.data(), &info, DIB_RGB_COLORS);
+        return;
+    }
 	SetDIBitsToDevice(	hdc,
 						x,
 						y,
@@ -2417,6 +2455,26 @@ void CFastBitmap::TextBlt(int x, int y, int cx, int cy, int srcx, int srcy, MODP
 	psrc = lpdib->lpDibBits + (srcx >> 1) + (srcy * srcwidth);
 	for (int iy=0; iy<cy; iy++)
 	{
+        auto *coverage = m_coverage.data() + (pdest - m_Dib.DibBits.data());
+        std::fill_n(coverage, cx, uint16(0));
+        if(lpdib->antialiased)
+        {
+            m_smoothUsed = true;
+            for(int column = 0; column < cx; column++)
+            {
+                const unsigned sourceX = x1 + column;
+                const unsigned source = psrc[sourceX / 2];
+                const unsigned pixel = (sourceX & 1) ? source & 15 : source >> 4;
+                if(lpdib->separatorStartX >= 0 && srcx + column >= lpdib->separatorStartX)
+                    pdest[column] = static_cast<uint8>(m_n4BitPalette[pixel] + m_nBlendOffset);
+                else
+                {
+                    pdest[column] = static_cast<uint8>((pixel == 15 ? m_nBkColor : m_nTextColor) + m_nBlendOffset);
+                    if(pixel > 0 && pixel < 15) coverage[column] = static_cast<uint16>(((m_nBkColor + m_nBlendOffset) << 4) | (15 - pixel));
+                }
+            }
+            pdest -= m_Dib.bmiHeader.biWidth; psrc += srcinc; continue;
+        }
 		uint8 *p = pdest;
 		UINT ix = x1;
 		if (ix&1)
@@ -2450,7 +2508,11 @@ void CFastBitmap::FillRect(int x, int y, int width, int height, uint8 color)
 	const int right = std::min(x + width, stride), bottom = std::min(y + height, rows);
 	for(int row = std::max(0, y); row < bottom; row++)
 		if(right > std::max(0, x))
-			std::fill_n(m_Dib.DibBits.begin() + (rows - row - 1) * stride + std::max(0, x), right - std::max(0, x), static_cast<uint8>(color + m_nBlendOffset));
+        {
+            const size_t offset = (rows - row - 1) * stride + std::max(0, x);
+			std::fill_n(m_Dib.DibBits.begin() + offset, right - std::max(0, x), static_cast<uint8>(color + m_nBlendOffset));
+            std::fill_n(m_coverage.begin() + offset, right - std::max(0, x), uint16(0));
+        }
 }
 
 void CFastBitmap::SetSize(int x, int y)
@@ -2471,7 +2533,11 @@ void CFastBitmap::SetSize(int x, int y)
 	}
 
 	x = (1 << m_nXShiftFactor);
-	if(m_Dib.DibBits.size() != static_cast<size_t>(y << m_nXShiftFactor)) m_Dib.DibBits.resize(y << m_nXShiftFactor);
+	if(m_Dib.DibBits.size() != static_cast<size_t>(y << m_nXShiftFactor))
+    {
+        m_Dib.DibBits.resize(y << m_nXShiftFactor);
+        m_coverage.assign(m_Dib.DibBits.size(), 0);
+    }
 	m_Dib.bmiHeader.biWidth = x;
 	m_Dib.bmiHeader.biHeight = y;
 }
@@ -2889,5 +2955,322 @@ mpt::ustring ConstructSampleFormatFileFilter(bool includeRaw)
 }
 
 
+
+
+// Shared application appearance. OS settings and external plugin editors are not modified.
+namespace SynMPTTheme
+{
+COLORREF Color(int index)
+{
+    switch(index)
+    {
+    case COLOR_WINDOW: return RGB(44,47,53);
+    case COLOR_BTNFACE: case COLOR_MENU: return RGB(56,59,66);
+    case COLOR_APPWORKSPACE: return RGB(35,38,43);
+    case COLOR_BTNSHADOW: return RGB(31,34,39);
+    case COLOR_BTNHIGHLIGHT: return RGB(80,85,94);
+    case COLOR_3DDKSHADOW: return RGB(24,27,31);
+    case COLOR_3DLIGHT: return RGB(68,73,81);
+    case COLOR_WINDOWTEXT: case COLOR_BTNTEXT: case COLOR_MENUTEXT: return RGB(226,229,235);
+    case COLOR_GRAYTEXT: return RGB(144,151,163);
+    case COLOR_HIGHLIGHT: return RGB(62,99,137);
+    case COLOR_HIGHLIGHTTEXT: return RGB(250,251,253);
+    case COLOR_INFOBK: return RGB(64,68,76);
+    case COLOR_INFOTEXT: return RGB(235,237,241);
+    default: return ::GetSysColor(index);
+    }
+}
+
+HBRUSH Brush(int index)
+{
+    static std::map<COLORREF, HBRUSH> brushes;
+    const auto color = Color(index);
+    const auto found = brushes.find(color);
+    if(found != brushes.end()) return found->second;
+    return brushes[color] = ::CreateSolidBrush(color);
+}
+
+COLORREF Mix(COLORREF background, COLORREF accent, unsigned percent)
+{
+    percent = std::min(percent, 100u);
+    const auto component = [percent](unsigned base, unsigned value) { return (base * (100 - percent) + value * percent + 50) / 100; };
+    return RGB(component(GetRValue(background), GetRValue(accent)), component(GetGValue(background), GetGValue(accent)), component(GetBValue(background), GetBValue(accent)));
+}
+
+void DrawAction(HDC dc, const RECT &bounds, const wchar_t *label, COLORREF accent, bool active, bool recordDot)
+{
+    const int saved = ::SaveDC(dc);
+    CRect rect(bounds); rect.DeflateRect(1, 1);
+    ::SetDCBrushColor(dc, active ? accent : Color(COLOR_BTNFACE));
+    ::FillRect(dc, rect, GetStockBrush(DC_BRUSH));
+    ::FrameRect(dc, rect, Brush(COLOR_BTNSHADOW));
+    if(recordDot)
+    {
+        const int diameter = std::max(4, std::min(rect.Width(), rect.Height()) - 6);
+        const int x = rect.CenterPoint().x, y = rect.CenterPoint().y;
+        ::SelectObject(dc, GetStockObject(DC_PEN)); ::SelectObject(dc, GetStockObject(DC_BRUSH));
+        ::SetDCPenColor(dc, active ? RGB(255,222,226) : RGB(237,95,112));
+        ::SetDCBrushColor(dc, active ? RGB(255,237,239) : RGB(174,53,70));
+        ::Ellipse(dc, x - diameter / 2, y - diameter / 2, x + (diameter + 1) / 2, y + (diameter + 1) / 2);
+    } else
+    {
+        ::SelectObject(dc, CMainFrame::GetGUIFont());
+        ::SetTextColor(dc, active ? RGB(21,28,36) : Color(COLOR_BTNTEXT)); ::SetBkMode(dc, TRANSPARENT);
+        ::DrawTextW(dc, label, -1, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    ::RestoreDC(dc, saved);
+}
+
+namespace
+{
+std::vector<HWND> roots;
+std::wstring Class(HWND window) { wchar_t name[128]{}; ::GetClassNameW(window, name, 128); return name; }
+constexpr UINT_PTR ThemeSubclassID = 0x53594E54;
+
+struct MenuEntry { HMENU menu; std::wstring text; bool bar, separator, submenu; };
+std::map<ULONG_PTR, std::unique_ptr<MenuEntry>> menuEntries;
+
+void StyleMenu(HMENU menu, bool bar)
+{
+    if(!menu) return;
+    MENUINFO background{}; background.cbSize = sizeof(background); background.fMask = MIM_BACKGROUND;
+    background.hbrBack = Brush(COLOR_MENU); ::SetMenuInfo(menu, &background);
+    for(int item = 0; item < ::GetMenuItemCount(menu); item++)
+    {
+        wchar_t label[512]{}; MENUITEMINFOW info{}; info.cbSize = sizeof(info);
+        info.fMask = MIIM_FTYPE | MIIM_DATA | MIIM_SUBMENU | MIIM_STRING;
+        info.dwTypeData = label; info.cch = 511;
+        if(!::GetMenuItemInfoW(menu, item, TRUE, &info)) continue;
+        if(info.hSubMenu) StyleMenu(info.hSubMenu, false);
+        auto found = menuEntries.find(info.dwItemData);
+        if((info.fType & MFT_OWNERDRAW) && found == menuEntries.end()) continue;
+        if(info.fType & MFT_BITMAP) continue;
+        MenuEntry *entry = nullptr;
+        if(found != menuEntries.end())
+        {
+            entry = found->second.get();
+            if(label[0]) entry->text = label;
+        } else
+        {
+            auto value = std::make_unique<MenuEntry>(MenuEntry{menu, label, bar, (info.fType & MFT_SEPARATOR) != 0, info.hSubMenu != nullptr});
+            entry = value.get(); menuEntries.emplace(reinterpret_cast<ULONG_PTR>(entry), std::move(value));
+        }
+        info.fMask = MIIM_FTYPE | MIIM_DATA; info.fType |= MFT_OWNERDRAW; info.dwItemData = reinterpret_cast<ULONG_PTR>(entry);
+        ::SetMenuItemInfoW(menu, item, TRUE, &info);
+    }
+}
+
+bool MenuMessage(HWND window, UINT message, WPARAM, LPARAM lParam, LRESULT &result)
+{
+    if(message == WM_INITMENU || message == WM_INITMENUPOPUP) return false;
+    if(message != WM_MEASUREITEM && message != WM_DRAWITEM) return false;
+    const auto type = message == WM_MEASUREITEM ? reinterpret_cast<MEASUREITEMSTRUCT *>(lParam)->CtlType : reinterpret_cast<DRAWITEMSTRUCT *>(lParam)->CtlType;
+    if(type != ODT_MENU) return false;
+    const auto data = message == WM_MEASUREITEM ? reinterpret_cast<MEASUREITEMSTRUCT *>(lParam)->itemData : reinterpret_cast<DRAWITEMSTRUCT *>(lParam)->itemData;
+    const auto found = menuEntries.find(data); if(found == menuEntries.end()) return false;
+    const auto &entry = *found->second;
+    const int dpi = HighDPISupport::GetDpiForWindow(window), padding = MulDiv(10, dpi, 96);
+    if(message == WM_MEASUREITEM)
+    {
+        auto *measure = reinterpret_cast<MEASUREITEMSTRUCT *>(lParam);
+        const auto dc = ::GetDC(window); const auto font = ::SelectObject(dc, CMainFrame::GetGUIFont());
+        SIZE size{}; ::GetTextExtentPoint32W(dc, entry.text.c_str(), static_cast<int>(entry.text.size()), &size);
+        ::SelectObject(dc, font); ::ReleaseDC(window, dc);
+        measure->itemWidth = size.cx + padding * (entry.bar ? 2 : 5);
+        measure->itemHeight = entry.separator ? padding : std::max<LONG>(size.cy + padding, MulDiv(22, dpi, 96));
+    } else
+    {
+        auto *draw = reinterpret_cast<DRAWITEMSTRUCT *>(lParam); const int saved = ::SaveDC(draw->hDC);
+        CRect rect(draw->rcItem); const bool selected = (draw->itemState & ODS_SELECTED) != 0;
+        ::FillRect(draw->hDC, rect, Brush(selected ? COLOR_HIGHLIGHT : COLOR_MENU));
+        if(entry.separator)
+        {
+            rect.top = rect.CenterPoint().y; rect.bottom = rect.top + 1; rect.DeflateRect(padding, 0);
+            ::FillRect(draw->hDC, rect, Brush(COLOR_BTNHIGHLIGHT));
+        } else
+        {
+            ::SetBkMode(draw->hDC, TRANSPARENT); ::SelectObject(draw->hDC, CMainFrame::GetGUIFont());
+            ::SetTextColor(draw->hDC, Color(draw->itemState & (ODS_DISABLED | ODS_GRAYED) ? COLOR_GRAYTEXT : COLOR_MENUTEXT));
+            if(draw->itemState & ODS_CHECKED)
+            { CRect mark(rect); mark.right = mark.left + padding * 2; ::DrawTextW(draw->hDC, L"\u2022", -1, mark, DT_CENTER | DT_VCENTER | DT_SINGLELINE); }
+            rect.left += padding * (entry.bar ? 1 : 2); rect.right -= padding * (entry.bar ? 1 : 2);
+            const auto split = entry.text.find(L'\t'); const auto label = entry.text.substr(0, split);
+            ::DrawTextW(draw->hDC, label.c_str(), -1, rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if(split != std::wstring::npos) ::DrawTextW(draw->hDC, entry.text.c_str() + split + 1, -1, rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            if(entry.submenu && !entry.bar) { rect.left = rect.right; rect.right += padding * 2; ::DrawTextW(draw->hDC, L"\u203a", -1, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE); }
+        }
+        ::RestoreDC(draw->hDC, saved);
+    }
+    result = TRUE; return true;
+}
+
+
+void PaintButton(HWND window, HDC dc)
+{
+    RECT bounds{}; ::GetClientRect(window, &bounds); CRect rect(bounds);
+    const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
+    const auto type = style & BS_TYPEMASK;
+    const bool check = type == BS_CHECKBOX || type == BS_AUTOCHECKBOX || type == BS_3STATE || type == BS_AUTO3STATE;
+    const bool radio = type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON;
+    const bool group = type == BS_GROUPBOX;
+    const bool enabled = ::IsWindowEnabled(window) != FALSE;
+    const auto state = ::SendMessage(window, BM_GETSTATE, 0, 0);
+    const bool pressed = (state & BST_PUSHED) != 0;
+    wchar_t text[512]{}; ::GetWindowTextW(window, text, 512);
+    ::FillRect(dc, rect, Brush(COLOR_BTNFACE));
+    const auto oldFont = ::SelectObject(dc, reinterpret_cast<HFONT>(::SendMessage(window, WM_GETFONT, 0, 0)));
+    ::SetBkMode(dc, TRANSPARENT); ::SetTextColor(dc, Color(enabled ? COLOR_BTNTEXT : COLOR_GRAYTEXT));
+    if(check || radio)
+    {
+        const int size = std::min(rect.Height(), MulDiv(13, HighDPISupport::GetDpiForWindow(window), 96));
+        CRect mark(rect.left + 1, rect.CenterPoint().y - size / 2, rect.left + 1 + size, rect.CenterPoint().y - size / 2 + size);
+        ::SelectObject(dc, GetStockObject(DC_PEN)); ::SelectObject(dc, GetStockObject(DC_BRUSH));
+        ::SetDCPenColor(dc, Color(COLOR_GRAYTEXT)); ::SetDCBrushColor(dc, Color(COLOR_WINDOW));
+        if(radio) ::Ellipse(dc, mark.left, mark.top, mark.right, mark.bottom);
+        else { ::Rectangle(dc, mark.left, mark.top, mark.right, mark.bottom); }
+        if(state & (BST_CHECKED | BST_INDETERMINATE))
+        {
+            mark.DeflateRect(std::max(2, size / 4), std::max(2, size / 4));
+            ::SetDCBrushColor(dc, RGB(117,181,239)); ::SetDCPenColor(dc, RGB(117,181,239));
+            if(radio) ::Ellipse(dc, mark.left, mark.top, mark.right, mark.bottom);
+            else ::Rectangle(dc, mark.left, mark.top, mark.right, mark.bottom);
+        }
+        rect.left += size + MulDiv(5, HighDPISupport::GetDpiForWindow(window), 96);
+        ::DrawTextW(dc, text, -1, rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    } else if(group)
+    {
+        rect.top += 6; ::FrameRect(dc, rect, Brush(COLOR_BTNHIGHLIGHT));
+        rect.top -= 6; rect.left += 8;
+        SIZE size{}; ::GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &size);
+        CRect label(rect.left, rect.top, rect.left + size.cx + 4, rect.top + size.cy);
+        ::FillRect(dc, label, Brush(COLOR_BTNFACE)); ::DrawTextW(dc, text, -1, label, DT_SINGLELINE | DT_LEFT);
+    } else
+    {
+        rect.DeflateRect(1, 1);
+        ::SetDCBrushColor(dc, pressed ? Color(COLOR_HIGHLIGHT) : Color(COLOR_3DLIGHT));
+        ::FillRect(dc, rect, GetStockBrush(DC_BRUSH)); ::FrameRect(dc, rect, Brush(type == BS_DEFPUSHBUTTON ? COLOR_HIGHLIGHT : COLOR_BTNSHADOW));
+        rect.DeflateRect(3, 1); ::DrawTextW(dc, text, -1, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    if((state & BST_FOCUS) && !group) { rect.DeflateRect(2, 2); ::DrawFocusRect(dc, rect); }
+    ::SelectObject(dc, oldFont);
+}
+
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
+{
+    const auto cls = Class(window);
+    LRESULT menuResult = 0;
+    if(MenuMessage(window, message, wParam, lParam, menuResult)) return menuResult;
+    if(message == WM_INITMENU || message == WM_INITMENUPOPUP)
+    {
+        const auto result = ::DefSubclassProc(window, message, wParam, lParam);
+        StyleMenu(reinterpret_cast<HMENU>(wParam), message == WM_INITMENU);
+        return result;
+    }
+    if(message >= WM_CTLCOLORMSGBOX && message <= WM_CTLCOLORSTATIC)
+    {
+        const auto dc = reinterpret_cast<HDC>(wParam);
+        const bool input = message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX;
+        ::SetTextColor(dc, Color(::IsWindowEnabled(reinterpret_cast<HWND>(lParam)) ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
+        ::SetBkColor(dc, Color(input ? COLOR_WINDOW : COLOR_BTNFACE));
+        return reinterpret_cast<LRESULT>(Brush(input ? COLOR_WINDOW : COLOR_BTNFACE));
+    }
+    if(message == WM_ERASEBKGND)
+    {
+        auto *permanent = CWnd::FromHandlePermanent(window);
+        if(cls == L"#32770" || cls == L"ToolbarWindow32" || cls == L"MDIClient" || cls == L"SysTabControl32"
+            || (permanent && dynamic_cast<CControlBar *>(permanent)))
+        { RECT rect{}; ::GetClientRect(window, &rect); ::FillRect(reinterpret_cast<HDC>(wParam), &rect, Brush(COLOR_BTNFACE)); return TRUE; }
+    }
+    if(message == WM_PAINT && cls == L"Button")
+    {
+        const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
+        if((style & BS_TYPEMASK) != BS_OWNERDRAW && !(style & (BS_BITMAP | BS_ICON)))
+        {
+            PAINTSTRUCT paint{}; HDC dc = ::BeginPaint(window, &paint); const int saved = ::SaveDC(dc);
+            PaintButton(window, dc); ::RestoreDC(dc, saved); ::EndPaint(window, &paint); return 0;
+        }
+    }
+    if(message == WM_NOTIFY && reinterpret_cast<NMHDR *>(lParam)->code == NM_CUSTOMDRAW)
+    {
+        auto *draw = reinterpret_cast<NMCUSTOMDRAW *>(lParam);
+        const auto childClass = Class(draw->hdr.hwndFrom);
+        if(childClass == L"ToolbarWindow32")
+        {
+            auto *toolbar = reinterpret_cast<NMTBCUSTOMDRAW *>(lParam);
+            if(draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if(draw->dwDrawStage == CDDS_ITEMPREPAINT)
+            {
+                toolbar->clrText = Color(COLOR_BTNTEXT); toolbar->clrBtnFace = Color(COLOR_BTNFACE);
+                toolbar->clrBtnHighlight = Color(COLOR_BTNHIGHLIGHT); toolbar->clrHighlightHotTrack = Color(COLOR_HIGHLIGHT);
+                return TBCDRF_USECDCOLORS;
+            }
+        }
+    }
+    if(message == WM_NCDESTROY) ::RemoveWindowSubclass(window, WindowProc, ThemeSubclassID);
+    return ::DefSubclassProc(window, message, wParam, lParam);
+}
+
+BOOL CALLBACK Apply(HWND window, LPARAM)
+{
+    DWORD_PTR data{};
+    if(::GetWindowSubclass(window, WindowProc, ThemeSubclassID, &data)) return TRUE;
+    const auto cls = Class(window);
+    // Limit skinning to our registered native controls, retaining custom editor painting.
+    if(cls == L"Button" || cls == L"Edit" || cls == L"Static" || cls == L"ComboBox" || cls == L"ListBox"
+        || cls == L"SysTreeView32" || cls == L"SysListView32" || cls == L"SysHeader32" || cls == L"SysTabControl32"
+        || cls == L"ToolbarWindow32" || cls == L"msctls_statusbar32" || cls == L"msctls_trackbar32"
+        || cls == L"msctls_updown32" || cls == L"#32770" || cls == L"MDIClient" || cls.rfind(L"Afx", 0) == 0)
+    {
+        ::SetWindowSubclass(window, WindowProc, ThemeSubclassID, 0);
+        if(cls == L"Button" || cls == L"SysTabControl32" || cls == L"SysTreeView32" || cls == L"SysListView32")
+            ::SetWindowTheme(window, L"", L"");
+        if(cls == L"SysTreeView32")
+        { TreeView_SetBkColor(window, Color(COLOR_WINDOW)); TreeView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
+        if(cls == L"SysListView32")
+        { ListView_SetBkColor(window, Color(COLOR_WINDOW)); ListView_SetTextBkColor(window, Color(COLOR_WINDOW)); ListView_SetTextColor(window, Color(COLOR_WINDOWTEXT)); }
+        ::InvalidateRect(window, nullptr, TRUE);
+    }
+    return TRUE;
+}
+}
+
+void RegisterWindow(HWND window)
+{
+    if(!window) return;
+    if(std::find(roots.begin(), roots.end(), window) == roots.end()) roots.push_back(window);
+    Apply(window, 0); ::EnumChildWindows(window, Apply, 0);
+    StyleMenu(::GetMenu(window), true);
+    ::DrawMenuBar(window);
+    // Documented DWM attribute; older Windows versions simply ignore the request.
+    using SetAttribute = HRESULT (WINAPI *)(HWND, DWORD, LPCVOID, DWORD);
+    static const auto library = ::LoadLibraryW(L"dwmapi.dll");
+    static const auto setAttribute = library ? reinterpret_cast<SetAttribute>(::GetProcAddress(library, "DwmSetWindowAttribute")) : nullptr;
+    if(setAttribute) { const BOOL dark = TRUE; setAttribute(window, 20, &dark, sizeof(dark)); }
+}
+
+void RefreshWindows()
+{
+    static DWORD last = 0;
+    const auto now = ::GetTickCount();
+    if(now - last < 250) return;
+    last = now;
+    for(auto entry = menuEntries.begin(); entry != menuEntries.end();)
+        if(!::IsMenu(entry->second->menu)) entry = menuEntries.erase(entry); else ++entry;
+    roots.erase(std::remove_if(roots.begin(), roots.end(), [](HWND window) { DWORD_PTR data{}; return !::IsWindow(window) || !::GetWindowSubclass(window, WindowProc, ThemeSubclassID, &data); }), roots.end());
+    for(auto window : roots) ::EnumChildWindows(window, Apply, 0);
+}
+
+bool HandleTransportKey(const MSG &message)
+{
+    if((message.message != WM_KEYDOWN && message.message != WM_KEYUP) || message.wParam != 'T'
+        || (::GetKeyState(VK_CONTROL) & 0x8000) || (::GetKeyState(VK_MENU) & 0x8000) || (::GetKeyState(VK_SHIFT) & 0x8000)) return false;
+    const auto cls = Class(::GetFocus());
+    if(cls == L"Edit" || cls.rfind(L"RichEdit", 0) == 0 || cls.rfind(L"RICHEDIT", 0) == 0 || cls == L"ComboBox") return false;
+    auto *frame = CMainFrame::GetMainFrame();
+    if(!frame || !frame->IsWindowEnabled() || (::GetActiveWindow() != frame->m_hWnd && ::GetAncestor(message.hwnd, GA_ROOTOWNER) != frame->m_hWnd)) return false;
+    if(message.message == WM_KEYDOWN && !(message.lParam & (1L << 30))) frame->SendMessage(WM_COMMAND, ID_TRANSPORT_BRING_HERE);
+    return true;
+}
+}
 
 OPENMPT_NAMESPACE_END

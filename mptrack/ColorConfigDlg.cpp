@@ -9,6 +9,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "ColorConfigDlg.h"
 #include "ColorSchemes.h"
 #include "FileDialog.h"
@@ -454,8 +455,8 @@ void COptionsColors::OnDrawItem(int nIdCtl, LPDRAWITEMSTRUCT lpdis)
 	case 9:
 	case 10:
 		p[0] = rgb2quad(CustomColors[MODCOLOR_BACKSAMPLE]);
-		p[7] = rgb2quad(GetSysColor(COLOR_BTNFACE));
-		p[8] = rgb2quad(GetSysColor(COLOR_BTNSHADOW));
+		p[7] = rgb2quad(SynMPTTheme::Color(COLOR_BTNFACE));
+		p[8] = rgb2quad(SynMPTTheme::Color(COLOR_BTNSHADOW));
 		p[10] = rgb2quad(CustomColors[MODCOLOR_SAMPLE_LOOPMARKER]);
 		p[11] = rgb2quad(CustomColors[MODCOLOR_SAMPLE_CUEPOINT]);
 		p[14] = rgb2quad(CustomColors[MODCOLOR_SAMPLE_SUSTAINMARKER]);

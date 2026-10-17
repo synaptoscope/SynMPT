@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "SampleEditorDialogs.h"
 #include "HighDPISupport.h"
 #include "Mptrack.h"
@@ -188,7 +189,7 @@ void CAmpDlg::OnDPIChanged()
 	const int iconSize = HighDPISupport::ScalePixels(16, m_hWnd);
 	const int imgWidth = iconSize * items;
 	std::vector<COLORREF> bits(imgWidth * iconSize, RGB(255, 0, 255));
-	const COLORREF col = GetSysColor(COLOR_WINDOWTEXT);
+	const COLORREF col = SynMPTTheme::Color(COLOR_WINDOWTEXT);
 	for(int i = 0, baseX = 0; i < items; i++, baseX += iconSize)
 	{
 		Fade::Func fadeFunc = Fade::GetFadeFunc(static_cast<Fade::Law>(m_fadeBox.GetItemData(i)));

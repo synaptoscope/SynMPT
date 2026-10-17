@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "TrackerSettings.h"
 #include "ExceptionHandler.h"
 #include "HighDPISupport.h"
@@ -196,7 +197,7 @@ TrackerSettings::TrackerSettings(SettingsContainer &conf)
 	, showDirsInSampleBrowser(conf, UL_("Display"), UL_("ShowDirsInSampleBrowser"), false)
 	, useOldStyleFolderBrowser(conf, UL_("Display"), UL_("UseOldStyleFolderBrowser"), false)
 	, defaultRainbowChannelColors(conf, UL_("Display"), UL_("DefaultChannelColors"), DefaultChannelColors::Random)
-	, commentsFont(conf, UL_("Display"), UL_("Comments Font"), FontSetting(UL_("Courier New"), 120))
+	, commentsFont(conf, UL_("Display"), UL_("Comments Font"), FontSetting(UL_("Consolas"), 90))
 	, mainToolBarVisibleItems(conf, UL_("Display"), UL_("MainToolBarVisibleItems"), MainToolBarItem::Default)
 	, treeViewOnLeft(conf, UL_("Display"), UL_("TreeViewOnLeft"), true)
 	, quickStartGroupsCollapsed(conf, UL_("Display"), UL_("QuickStartGroupsExpanded"), 0)
@@ -273,7 +274,7 @@ TrackerSettings::TrackerSettings(SettingsContainer &conf)
 	, gnAutoChordWaitTime(conf, UL_("Pattern Editor"), UL_("AutoChordWaitTime"), 60)
 	, orderlistMargins(conf, UL_("Pattern Editor"), UL_("DefaultSequenceMargins"), 0)
 	, rowDisplayOffset(conf, UL_("Pattern Editor"), UL_("RowDisplayOffset"), 0)
-	, patternFont(conf, UL_("Pattern Editor"), UL_("Font"), FontSetting(PATTERNFONT_SMALL, 0))
+	, patternFont(conf, UL_("Pattern Editor"), UL_("Font"), FontSetting(UL_("Consolas"), 90))
 	, patternFontDot(conf, UL_("Pattern Editor"), UL_("FontDot"), UL_("."))
 	, effectVisWidth(conf, UL_("Pattern Editor"), UL_("EffectVisWidth"), -1)
 	, effectVisHeight(conf, UL_("Pattern Editor"), UL_("EffectVisHeight"), -1)
@@ -415,6 +416,21 @@ TrackerSettings::TrackerSettings(SettingsContainer &conf)
 		if(ncol == MODCOLOR_BACKCURROW)
 			rgbCustomColors[MODCOLOR_BACKRECORDROW] = rgbCustomColors[MODCOLOR_BACKCURROW];
 	}
+    // One-time appearance migration; keep the former palette recoverable in the profile.
+    if(conf.Read<int32>(UL_("SynMPT"), UL_("AppearanceVersion"), 0) < 1)
+    {
+        for(int ncol = 0; ncol < MAX_MODCOLORS; ncol++)
+            conf.Write<uint32>(UL_("SynMPT Previous Colors"), MPT_UFORMAT("Color{}")(mpt::ufmt::dec0<2>(ncol)), rgbCustomColors[ncol]);
+        conf.Write<FontSetting>(UL_("SynMPT"), UL_("PreviousPatternFont"), patternFont.Get());
+        conf.Write<FontSetting>(UL_("SynMPT"), UL_("PreviousCommentsFont"), commentsFont.Get());
+        GetDefaultColourScheme(rgbCustomColors);
+        for(int ncol = 0; ncol < MAX_MODCOLORS; ncol++)
+            conf.Write<uint32>(UL_("Display"), MPT_UFORMAT("Color{}")(mpt::ufmt::dec0<2>(ncol)), rgbCustomColors[ncol]);
+        patternFont = FontSetting(UL_("Consolas"), 90);
+        commentsFont = FontSetting(UL_("Consolas"), 90);
+        patternSetup = patternSetup.Get() | PatternSetup::EffectHighlight;
+        conf.Write<int32>(UL_("SynMPT"), UL_("AppearanceVersion"), 1);
+    }
 	// Paths
 	m_szKbdFile = conf.Read<mpt::PathString>(UL_("Paths"), UL_("Key_Config_File"), mpt::PathString());
 	conf.Forget(UL_("Paths"), UL_("Key_Config_File"));
@@ -1275,24 +1291,24 @@ void TrackerSettings::SetResamplerSettings(const CResamplerSettings &settings)
 
 void TrackerSettings::GetDefaultColourScheme(std::array<COLORREF, MAX_MODCOLORS> &colours)
 {
-	colours[MODCOLOR_BACKNORMAL] = RGB(0xFF, 0xFF, 0xFF);
-	colours[MODCOLOR_TEXTNORMAL] = RGB(0x00, 0x00, 0x00);
-	colours[MODCOLOR_BACKCURROW] = RGB(0xC0, 0xC0, 0xC0);
-	colours[MODCOLOR_BACKRECORDROW] = RGB(0xC0, 0xC0, 0xC0);
-	colours[MODCOLOR_TEXTCURROW] = RGB(0x00, 0x00, 0x00);
-	colours[MODCOLOR_BACKSELECTED] = RGB(0x00, 0x00, 0x00);
-	colours[MODCOLOR_TEXTSELECTED] = RGB(0xFF, 0xFF, 0xFF);
-	colours[MODCOLOR_SAMPLE] = RGB(0xFF, 0x00, 0x00);
-	colours[MODCOLOR_BACKPLAYCURSOR] = RGB(0xFF, 0xFF, 0x80);
-	colours[MODCOLOR_TEXTPLAYCURSOR] = RGB(0x00, 0x00, 0x00);
-	colours[MODCOLOR_BACKHILIGHT] = RGB(0xE0, 0xE8, 0xE0);
+	colours[MODCOLOR_BACKNORMAL] = RGB(44,47,53);
+	colours[MODCOLOR_TEXTNORMAL] = RGB(134,143,156);
+	colours[MODCOLOR_BACKCURROW] = RGB(67,78,93);
+	colours[MODCOLOR_BACKRECORDROW] = RGB(78,65,75);
+	colours[MODCOLOR_TEXTCURROW] = RGB(243,245,249);
+	colours[MODCOLOR_BACKSELECTED] = RGB(64,101,143);
+	colours[MODCOLOR_TEXTSELECTED] = RGB(255,255,255);
+	colours[MODCOLOR_SAMPLE] = RGB(115,185,221);
+	colours[MODCOLOR_BACKPLAYCURSOR] = RGB(76,88,67);
+	colours[MODCOLOR_TEXTPLAYCURSOR] = RGB(245,248,238);
+	colours[MODCOLOR_BACKHILIGHT] = RGB(55,59,66);
 	// Effect Colors
-	colours[MODCOLOR_NOTE] = RGB(0x00, 0x00, 0x80);
-	colours[MODCOLOR_INSTRUMENT] = RGB(0x00, 0x80, 0x80);
-	colours[MODCOLOR_VOLUME] = RGB(0x00, 0x80, 0x00);
-	colours[MODCOLOR_PANNING] = RGB(0x00, 0x80, 0x80);
-	colours[MODCOLOR_PITCH] = RGB(0x80, 0x80, 0x00);
-	colours[MODCOLOR_GLOBALS] = RGB(0x80, 0x00, 0x00);
+	colours[MODCOLOR_NOTE] = RGB(232,234,239);
+	colours[MODCOLOR_INSTRUMENT] = RGB(127,183,240);
+	colours[MODCOLOR_VOLUME] = RGB(130,203,153);
+	colours[MODCOLOR_PANNING] = RGB(189,159,226);
+	colours[MODCOLOR_PITCH] = RGB(231,196,113);
+	colours[MODCOLOR_GLOBALS] = RGB(238,176,112);
 	// VU-Meters
 	colours[MODCOLOR_VUMETER_LO] = RGB(0x00, 0xC8, 0x00);
 	colours[MODCOLOR_VUMETER_MED] = RGB(0xFF, 0xC8, 0x00);
@@ -1301,18 +1317,18 @@ void TrackerSettings::GetDefaultColourScheme(std::array<COLORREF, MAX_MODCOLORS>
 	colours[MODCOLOR_VUMETER_MED_VST] = RGB(0xFF, 0xC8, 0x00);
 	colours[MODCOLOR_VUMETER_HI_VST] = RGB(0xE1, 0x00, 0x00);
 	// Channel separators
-	colours[MODCOLOR_SEPSHADOW] = GetSysColor(COLOR_BTNSHADOW);
-	colours[MODCOLOR_SEPFACE] = GetSysColor(COLOR_BTNFACE);
-	colours[MODCOLOR_SEPHILITE] = GetSysColor(COLOR_BTNHIGHLIGHT);
+	colours[MODCOLOR_SEPSHADOW] = SynMPTTheme::Color(COLOR_BTNSHADOW);
+	colours[MODCOLOR_SEPFACE] = SynMPTTheme::Color(COLOR_BTNFACE);
+	colours[MODCOLOR_SEPHILITE] = SynMPTTheme::Color(COLOR_BTNHIGHLIGHT);
 	// Pattern blend colour
-	colours[MODCOLOR_BLENDCOLOR] = GetSysColor(COLOR_BTNFACE);
+	colours[MODCOLOR_BLENDCOLOR] = SynMPTTheme::Color(COLOR_BTNFACE);
 	// Dodgy commands
-	colours[MODCOLOR_DODGY_COMMANDS] = RGB(0xC0, 0x00, 0x00);
+	colours[MODCOLOR_DODGY_COMMANDS] = RGB(244,119,130);
 	// Sample / instrument editor
-	colours[MODCOLOR_BACKSAMPLE] = RGB(0x00, 0x00, 0x00);
-	colours[MODCOLOR_SAMPLESELECTED] = RGB(0xFF, 0xFF, 0xFF);
-	colours[MODCOLOR_BACKENV] = RGB(0x00, 0x00, 0x00);
-	colours[MODCOLOR_ENVELOPES] = RGB(0x00, 0x00, 0xFF);
+	colours[MODCOLOR_BACKSAMPLE] = RGB(40,43,49);
+	colours[MODCOLOR_SAMPLESELECTED] = RGB(236,239,245);
+	colours[MODCOLOR_BACKENV] = RGB(40,43,49);
+	colours[MODCOLOR_ENVELOPES] = RGB(129,187,238);
 	colours[MODCOLOR_ENVELOPE_RELEASE] = RGB(0xFF, 0xFF, 0x00);
 	colours[MODCOLOR_SAMPLE_LOOPMARKER] = RGB(0x30, 0xCC, 0x30);
 	colours[MODCOLOR_SAMPLE_SUSTAINMARKER] = RGB(50, 0xCC, 0xCC);

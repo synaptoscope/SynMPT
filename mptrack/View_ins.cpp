@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "View_ins.h"
 #include "Childfrm.h"
 #include "Ctrl_ins.h"
@@ -1249,9 +1250,9 @@ LRESULT CViewInstrument::OnPlayerNotify(Notification *pnotify)
 void CViewInstrument::DrawNcButton(CDC *pDC, UINT nBtn)
 {
 	CRect rect;
-	COLORREF crHi = GetSysColor(COLOR_3DHILIGHT);
-	COLORREF crDk = GetSysColor(COLOR_3DSHADOW);
-	COLORREF crFc = GetSysColor(COLOR_3DFACE);
+	COLORREF crHi = SynMPTTheme::Color(COLOR_3DHILIGHT);
+	COLORREF crDk = SynMPTTheme::Color(COLOR_3DSHADOW);
+	COLORREF crFc = SynMPTTheme::Color(COLOR_3DFACE);
 	COLORREF c1, c2;
 
 	const bool flat = (TrackerSettings::Instance().patternSetup & PatternSetup::FlatToolbarButtons);
@@ -1342,11 +1343,11 @@ void CViewInstrument::OnNcPaint()
 			// Shadow
 			auto shadowRect = rect;
 			shadowRect.top = shadowRect.bottom - 1;
-			pDC->FillSolidRect(&shadowRect, GetSysColor(COLOR_BTNSHADOW));
+			pDC->FillSolidRect(&shadowRect, SynMPTTheme::Color(COLOR_BTNSHADOW));
 		}
 		rect.bottom--;
 		if(rect.top < rect.bottom)
-			pDC->FillSolidRect(&rect, GetSysColor(COLOR_BTNFACE));
+			pDC->FillSolidRect(&rect, SynMPTTheme::Color(COLOR_BTNFACE));
 		if(rect.top + 2 < rect.bottom)
 		{
 			for(UINT i = 0; i < ENV_LEFTBAR_BUTTONS; i++)

@@ -9,6 +9,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "Mainbar.h"
 #include "Childfrm.h"
 #include "HighDPISupport.h"
@@ -276,9 +277,17 @@ static_assert(std::size(MainButtons) == NUM_TOOLBAR_INDEX);
 
 enum { MAX_MIDI_DEVICES = 256 };
 
+static LRESULT CALLBACK FloatingTransportProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
+{
+    if(message == WM_NCLBUTTONDBLCLK && wParam == HTCAPTION) return 0;
+    if(message == WM_NCDESTROY) ::RemoveWindowSubclass(window, FloatingTransportProc, IDW_SYN_TRANSPORT);
+    return ::DefSubclassProc(window, message, wParam, lParam);
+}
+
 BEGIN_MESSAGE_MAP(CMainToolBar, CToolBarEx)
 	//{{AFX_MSG_MAP(CMainToolBar)
 	ON_WM_VSCROLL()
+    ON_WM_LBUTTONDBLCLK()
 	ON_NOTIFY_EX_RANGE(TTN_NEEDTEXT, 0, 0xFFFF, &CMainToolBar::OnToolTipText)
 	ON_NOTIFY_REFLECT(TBN_DROPDOWN, &CMainToolBar::OnTbnDropDownToolBar)
 	ON_COMMAND_RANGE(ID_SELECT_MIDI_DEVICE, ID_SELECT_MIDI_DEVICE + MAX_MIDI_DEVICES, &CMainToolBar::OnSelectMIDIDevice)
@@ -358,6 +367,17 @@ BOOL CMainToolBar::Create(CWnd *parent)
 	return TRUE;
 }
 
+
+void CMainToolBar::OnLButtonDblClk(UINT flags, CPoint point)
+{
+    if(!m_transport) CToolBarEx::OnLButtonDblClk(flags, point);
+}
+
+void CMainToolBar::LockFloatingFrame()
+{
+    EnableDocking(0);
+    if(IsFloating()) ::SetWindowSubclass(GetParentFrame()->m_hWnd, FloatingTransportProc, IDW_SYN_TRANSPORT, 0);
+}
 
 LRESULT CMainToolBar::OnDPIChangedAfterParent(WPARAM, LPARAM)
 {
@@ -1485,7 +1505,7 @@ void CModTreeBar::OnNcPaint()
 	{
 		CDC *pDC = GetWindowDC();
 		HDC hdc = pDC->m_hDC;
-		FillRect(hdc, &rect, GetSysColorBrush(COLOR_BTNFACE));
+		FillRect(hdc, &rect, SynMPTTheme::Brush(COLOR_BTNFACE));
 		ReleaseDC(pDC);
 	}
 }
@@ -1852,9 +1872,9 @@ void CDocumentTabCtrl::DrawItem(LPDRAWITEMSTRUCT item)
     CDC dc; dc.Attach(item->hDC);
     const bool active = index == GetCurSel();
     CRect rect(item->rcItem); rect.DeflateRect(2, 2);
-    dc.FillSolidRect(rect, GetSysColor(active ? COLOR_WINDOW : COLOR_BTNFACE));
+    dc.FillSolidRect(rect, SynMPTTheme::Color(active ? COLOR_WINDOW : COLOR_BTNFACE));
     auto *oldFont = dc.SelectObject(GetFont());
-    dc.SetBkMode(TRANSPARENT); dc.SetTextColor(GetSysColor(COLOR_BTNTEXT));
+    dc.SetBkMode(TRANSPARENT); dc.SetTextColor(SynMPTTheme::Color(COLOR_BTNTEXT));
     CRect text(rect); text.left += HighDPISupport::ScalePixels(8, m_hWnd);
     text.right = CloseRect(index).left - HighDPISupport::ScalePixels(4, m_hWnd);
     dc.DrawText(m_owner.m_entries[index].title, text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -1863,7 +1883,7 @@ void CDocumentTabCtrl::DrawItem(LPDRAWITEMSTRUCT item)
     if(active)
     {
         rect.top = rect.bottom - HighDPISupport::ScalePixels(2, m_hWnd);
-        dc.FillSolidRect(rect, GetSysColor(COLOR_HIGHLIGHT));
+        dc.FillSolidRect(rect, SynMPTTheme::Color(COLOR_HIGHLIGHT));
     }
     dc.SelectObject(oldFont); dc.Detach();
 }
@@ -1935,7 +1955,7 @@ BOOL CDocumentTabBar::Create(CWnd *parent)
 {
     m_dwStyle = CBRS_ALIGN_TOP | CBRS_SIZE_FIXED;
     SetBorders(0, 0, 0, 0);
-    if(!CWnd::Create(AfxRegisterWndClass(0, ::LoadCursor(nullptr, IDC_ARROW), GetSysColorBrush(COLOR_BTNFACE)),
+    if(!CWnd::Create(AfxRegisterWndClass(0, ::LoadCursor(nullptr, IDC_ARROW), SynMPTTheme::Brush(COLOR_BTNFACE)),
         _T("Song tabs"), WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, CRect(0, 0, 0, 0), parent, IDW_SYN_DOCUMENT_TABS)) return FALSE;
     if(!m_tabs.Create(WS_CHILD | WS_VISIBLE | TCS_SINGLELINE | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED | TCS_FOCUSNEVER,
         CRect(0, 0, 0, 0), this, DOCUMENT_TABS_CONTROL)) return FALSE;

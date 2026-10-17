@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "View_smp.h"
 #include "Childfrm.h"
 #include "Clipboard.h"
@@ -1162,7 +1163,7 @@ void CViewSample::OnDraw(CDC *pDC)
 		CRect timeline = rcClient;
 		timeline.bottom = timeline.top + timelineHeight + 1;
 		m_offScreenDC.DrawEdge(timeline, EDGE_ETCHED, BF_MIDDLE | BF_BOTTOM);
-		m_offScreenDC.SetTextColor(GetSysColor(COLOR_BTNTEXT));
+		m_offScreenDC.SetTextColor(SynMPTTheme::Color(COLOR_BTNTEXT));
 		m_offScreenDC.SetBkMode(TRANSPARENT);
 		if(!m_timelineUnit)
 			m_timelineUnit = 1;
@@ -1644,9 +1645,9 @@ UINT CViewSample::GetNcButtonAtPoint(CPoint point, CRect *outRect) const
 void CViewSample::DrawNcButton(CDC *pDC, UINT nBtn)
 {
 	CRect rect;
-	COLORREF crHi = GetSysColor(COLOR_3DHILIGHT);
-	COLORREF crDk = GetSysColor(COLOR_3DSHADOW);
-	COLORREF crFc = GetSysColor(COLOR_3DFACE);
+	COLORREF crHi = SynMPTTheme::Color(COLOR_3DHILIGHT);
+	COLORREF crDk = SynMPTTheme::Color(COLOR_3DSHADOW);
+	COLORREF crFc = SynMPTTheme::Color(COLOR_3DFACE);
 	COLORREF c1, c2;
 
 	const bool flat = (TrackerSettings::Instance().patternSetup & PatternSetup::FlatToolbarButtons);
@@ -1727,11 +1728,11 @@ void CViewSample::OnNcPaint()
 			// Shadow
 			auto shadowRect = rect;
 			shadowRect.top = shadowRect.bottom - 1;
-			pDC->FillSolidRect(&shadowRect, GetSysColor(COLOR_BTNSHADOW));
+			pDC->FillSolidRect(&shadowRect, SynMPTTheme::Color(COLOR_BTNSHADOW));
 		}
 		rect.bottom--;
 		if(rect.top < rect.bottom)
-			pDC->FillSolidRect(&rect, GetSysColor(COLOR_BTNFACE));
+			pDC->FillSolidRect(&rect, SynMPTTheme::Color(COLOR_BTNFACE));
 		if(rect.top + 2 < rect.bottom)
 		{
 			for (UINT i=0; i<SMP_LEFTBAR_BUTTONS; i++)

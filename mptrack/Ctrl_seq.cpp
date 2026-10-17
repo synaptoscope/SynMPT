@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "Ctrl_pat.h"
 #include "Globals.h"
 #include "HighDPISupport.h"
@@ -782,9 +783,9 @@ void COrderList::OnPaint()
 	CPaintDC dc(this);
 	HGDIOBJ oldFont = dc.SelectObject(m_hFont);
 	HGDIOBJ oldPen = dc.SelectStockObject(DC_PEN);
-	const auto separatorColor = GetSysColor(COLOR_WINDOW) ^ 0x808080;
-	const auto colorText = GetSysColor(COLOR_WINDOWTEXT), colorInvalid = GetSysColor(COLOR_GRAYTEXT), colorTextSel = GetSysColor(COLOR_HIGHLIGHTTEXT);
-	const auto windowColor = GetSysColor(COLOR_WINDOW), highlightColor = GetSysColor(COLOR_HIGHLIGHT), faceColor = GetSysColor(COLOR_BTNFACE);
+	const auto separatorColor = SynMPTTheme::Color(COLOR_WINDOW) ^ 0x808080;
+	const auto colorText = SynMPTTheme::Color(COLOR_WINDOWTEXT), colorInvalid = SynMPTTheme::Color(COLOR_GRAYTEXT), colorTextSel = SynMPTTheme::Color(COLOR_HIGHLIGHTTEXT);
+	const auto windowColor = SynMPTTheme::Color(COLOR_WINDOW), highlightColor = SynMPTTheme::Color(COLOR_HIGHLIGHT), faceColor = SynMPTTheme::Color(COLOR_BTNFACE);
 
 	dc.SetDCPenColor(separatorColor);
 

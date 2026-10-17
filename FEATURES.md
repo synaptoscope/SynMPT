@@ -2,13 +2,59 @@
 
 Working notes for the public OpenMPT fork. This describes the intended composing workflow, not a fixed implementation plan.
 
+## Current scope and deferred work â€” 2026-10-17
+
+The owner authorized the gray appearance/font/track-tint pass plus floating-transport recovery and header button feedback. The following functional work is recorded for later; it is not implemented by the appearance pass.
+
+### Composite keyboard editor and reusable presets
+
+- A small piano icon in the group's instrument row opens a compact mapping window. Default to 88 keys with Middle C explicitly identified.
+- Each child has a named instrument/sample button. Selecting it selects that child for mapping and highlights its currently assigned keys. Click a key for a single-note assignment; drag across keys for a continuous range, with adjustable endpoints, clear and undo.
+- Use a separate mapping palette, independent of song-view track colors: related song tracks may all have the same color. Save assignment colors with the composite. Labeled, separate range bands keep ownership clear and allow a later overlapping/layered view.
+- An initial GUI may enforce exclusive assignments with explicit conflict/reassignment feedback. Existing composite routing already permits overlapping ranges/layers; changing that playback/input policy is not part of the appearance pass.
+- Support fixed sounding pitch for drum mappings and root-relative pitched mapping for guitar/instrument ranges. The proposed mapping/audition toggle and compact control details still need owner hands-on review.
+- Add reusable named composite presets containing the parent group, child tracks, sounds, mappings and relevant mix settings. Loading creates an instance in the current song. Arming records ordinary mapped notes into the child lanes, building on current input routing.
+- Existing composites are currently stored inside MPTM songs; no standalone composite preset save/load exists yet. Whole-song starter files remain the available reuse method.
+
+### Native .synmpt documents and recoverable conversion
+
+- Make `.synmpt` the default native song/project format, with explicit internal identity and a format version. The first version can reuse the existing MPTM musical storage alongside versioned SynMPT metadata.
+- Opening another song format prompts to convert a copy, keep the original format, or cancel. Existing native documents open directly. Conversion happens in memory; the source file stays untouched and the first native save chooses a new filename.
+- Preserve recovery copies before future upgrades that overwrite an existing native file. Keep musical data separately identified from workspace/layout metadata so presentation changes do not alter the composition.
+- Expose format conversion/export clearly. Converting out saves an explicitly converted copy and explains unsupported features. Groups, composite input maps and custom bus mixing cannot be assumed to round-trip through other formats; sound-preserving export needs its own treatment.
+- OpenMPT's existing Song Properties format conversion remains available until this workflow is implemented.
+
+### Empty documents and track/preset creation
+
+- A fresh song should present an empty workspace with no visible tracks.
+- Provide `+ Track` for an ordinary track or empty group, and `+ Preset` to create the required group/tracks from a saved instrument setup. Song templates can provide a complete prebuilt starting arrangement.
+- Proper empty-document handling is unbuilt; current native channel-count assumptions still apply.
+
+### Drag arrangement and group ownership
+
+- Start a track drag from its name/header. Move a multi-selection together in its current order; a group carries its children.
+- Hovering a bus body highlights its right edge and previews the moved tracks at their tentative lower child position. Releasing assigns them to that bus.
+- Hovering the top insertion zone highlights the top edge and clearly identifies before/after placement without grouping. Use this to remove tracks from a group too.
+- Preview order and ownership during the drag; commit a single undoable change on release. The existing menu-based group/output assignment remains the current implementation.
+
+### Automatic song-view colors
+
+- Follow the SWS extension's name-rule approach: keyword, enabled state, hex color/swatch, and top-to-bottom priority; the first matching rule wins.
+- Proposed defaults: case-insensitive matching when a track is created/renamed, draggable rule priority, and an Auto/Manual choice per track so manual colors survive renaming.
+- The appearance pass displays existing track colors through the column body. It does not add the rule engine. Keyboard mapping colors remain independent.
+
+### Other parked work
+
+- Dragging document tabs to reorder them and detaching songs for a second monitor remain explicitly low priority.
+- Musical step-record note lengths, rest/advance/tie controls, a global master track/lane, and separate sample/instrument editor windows remain on the earlier desired list.
+
 ## Main workspace
 
 - Keep the song/order view.
 - Bring the General controls and pattern editor together in the main song workspace. Put per-channel controls directly above their pattern columns.
 - Keep the default workspace compact: the pattern grid gets most of the space, and additional controls expand only when needed.
 - Make the workspace useful across wide and multiple monitors, with resizable, movable windows.
-- Provide a compact transport that can float or dock, freeing space above the pattern grid. Remember its position between sessions.
+- Provide a compact floating transport, freeing space above the pattern grid. Remember its position and provide a reliable recall shortcut; accidental docking should be prevented.
 - Put sample and instrument editing in their own windows rather than hiding them behind tabs.
 
 ## Tracks and master

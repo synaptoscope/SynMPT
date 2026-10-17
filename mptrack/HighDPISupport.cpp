@@ -186,7 +186,10 @@ void HighDPISupport::CreateGUIFont(CFont &font, HWND hwnd)
 	metrics.cbSize = sizeof(metrics);
 	HighDPISupport::SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, hwnd);
 	font.DeleteObject();
-	font.CreateFontIndirect(&metrics.lfMessageFont);
+	metrics.lfMessageFont.lfHeight = -MulDiv(9, HighDPISupport::GetDpiForWindow(hwnd), 72);
+    wcscpy_s(metrics.lfMessageFont.lfFaceName, L"Segoe UI");
+    metrics.lfMessageFont.lfQuality = CLEARTYPE_QUALITY;
+    font.CreateFontIndirect(&metrics.lfMessageFont);
 }
 
 

@@ -118,6 +118,20 @@ static void DrawString(HDC hDC, const char_t *text, int len, int x, int y, int w
 	}
 }
 
+// Rasterize at 32 bits, then retain 16 levels of glyph coverage for colored text.
+static void CopyGlyphCoverage(MODPLUGDIB &destination, const uint8 *pixels)
+{
+    const int width = destination.bmiHeader.biWidth, height = std::abs(destination.bmiHeader.biHeight);
+    for(int row = 0; row < height; row++)
+        for(int column = 0; column < width; column += 2)
+        {
+            const size_t source = (static_cast<size_t>(row) * width + column) * 4;
+            const auto first = std::min(15u, (static_cast<unsigned>(pixels[source]) + 8) / 17);
+            const auto second = std::min(15u, (static_cast<unsigned>(pixels[source + 4]) + 8) / 17);
+            destination.lpDibBits[(static_cast<size_t>(row) * width + column) / 2] = static_cast<uint8>((first << 4) | second);
+        }
+}
+
 void PatternFont::UpdateFont(HWND hwnd)
 {
 	const int dpi = HighDPISupport::GetDpiForWindow(hwnd);
@@ -152,6 +166,7 @@ void PatternFont::UpdateFont(HWND hwnd)
 	previousDPI = dpi;
 	DeleteFontData();
 	pf.dib = &customFontBitmap;
+    customFontBitmap.antialiased = false; customFontBitmap.separatorStartX = -1;
 	pf.dibASCII = nullptr;
 
 	// Upscale built-in font?
@@ -254,12 +269,14 @@ void PatternFont::UpdateFont(HWND hwnd)
 	// Create our own font!
 
 	CDC hDC;
-	hDC.CreateCompatibleDC(CDC::FromHandle(::GetDC(hwnd)));
+	const auto windowDC = ::GetDC(hwnd);
+    hDC.CreateCompatibleDC(CDC::FromHandle(windowDC));
+    ::ReleaseDC(hwnd, windowDC);
 	// Point size to pixels
 	font.size = -MulDiv(font.size, dpi, 720);
 
 	CFont gdiFont;
-	gdiFont.CreateFont(font.size, 0, 0, 0, font.flags[FontSetting::Bold] ? FW_BOLD : FW_NORMAL, font.flags[FontSetting::Italic] ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_RASTER_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY, FIXED_PITCH | FF_DONTCARE, mpt::ToCString(font.name));
+	gdiFont.CreateFont(font.size, 0, 0, 0, font.flags[FontSetting::Bold] ? FW_BOLD : FW_NORMAL, font.flags[FontSetting::Italic] ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_RASTER_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH | FF_DONTCARE, mpt::ToCString(font.name));
 	CFont *oldFont = hDC.SelectObject(&gdiFont);
 
 	CPoint pt = hDC.GetTextExtent(_T("W"));
@@ -322,8 +339,11 @@ void PatternFont::UpdateFont(HWND hwnd)
 	pf.dib->bmiColors[0] = rgb2quad(RGB(0x00, 0x00, 0x00));
 	pf.dib->bmiColors[15] = rgb2quad(RGB(0xFF, 0xFF, 0xFF));
 
+    pf.dib->antialiased = true; pf.dib->separatorStartX = width - 4;
 	uint8 *data = nullptr;
-	HBITMAP bitmap = ::CreateDIBSection(hDC, (BITMAPINFO *)&pf.dib->bmiHeader, DIB_RGB_COLORS, (void **)&data, nullptr, 0);
+    BITMAPINFO renderInfo{}; renderInfo.bmiHeader = pf.dib->bmiHeader;
+    renderInfo.bmiHeader.biBitCount = 32; renderInfo.bmiHeader.biSizeImage = renderInfo.bmiHeader.biWidth * height * 4;
+	HBITMAP bitmap = ::CreateDIBSection(hDC, &renderInfo, DIB_RGB_COLORS, (void **)&data, nullptr, 0);
 	if(!bitmap)
 	{
 		hDC.SelectObject(oldFont);
@@ -406,7 +426,7 @@ void PatternFont::UpdateFont(HWND hwnd)
 	DrawChar(hDC, 'd', pf.nAlphaAM_X, pf.nAlphaAM_Y + 17 * charHeight, charWidth, charHeight);
 
 	::GdiFlush();
-	std::memcpy(pf.dib->lpDibBits, data, pf.dib->bmiHeader.biSizeImage);
+	CopyGlyphCoverage(*pf.dib, data);
 	// Create 4-pixel border
 	const int bmWidth2 = pf.dib->bmiHeader.biWidth / 2;
 	for(int y = 0, x = width / 2 - 2; y < height; y++, x += bmWidth2)
@@ -435,8 +455,11 @@ void PatternFont::UpdateFont(HWND hwnd)
 		pf.dibASCII->bmiColors[0] = rgb2quad(RGB(0x00, 0x00, 0x00));
 		pf.dibASCII->bmiColors[15] = rgb2quad(RGB(0xFF, 0xFF, 0xFF));
 
+        pf.dibASCII->antialiased = true; pf.dibASCII->separatorStartX = -1;
 		uint8 *data = nullptr;
-		HBITMAP bitmap = ::CreateDIBSection(hDC, (BITMAPINFO *)&pf.dibASCII->bmiHeader, DIB_RGB_COLORS, (void **)&data, nullptr, 0);
+        BITMAPINFO renderInfo{}; renderInfo.bmiHeader = pf.dibASCII->bmiHeader;
+        renderInfo.bmiHeader.biBitCount = 32; renderInfo.bmiHeader.biSizeImage = renderInfo.bmiHeader.biWidth * charHeight * 4;
+		HBITMAP bitmap = ::CreateDIBSection(hDC, &renderInfo, DIB_RGB_COLORS, (void **)&data, nullptr, 0);
 		if(!bitmap)
 		{
 			hDC.SelectObject(oldFont);
@@ -458,7 +481,7 @@ void PatternFont::UpdateFont(HWND hwnd)
 		}
 		::GdiFlush();
 
-		std::memcpy(pf.dibASCII->lpDibBits, data, pf.dibASCII->bmiHeader.biSizeImage);
+		CopyGlyphCoverage(*pf.dibASCII, data);
 
 		hDC.SelectObject(oldBitmap);
 		DeleteBitmap(bitmap);

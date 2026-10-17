@@ -8,6 +8,7 @@
  */
 
 #include "stdafx.h"
+#include "SynMPTTheme.h"
 #include "CImageListEx.h"
 #include "Image.h"
 #include "MPTrackUtil.h"
@@ -31,7 +32,7 @@ bool CImageListEx::Create(UINT resourceID, int cx, int cy, int nInitial, int nGr
 		return false;
 	}
 
-	const RawGDIDIB::Pixel buttonColor = GetSysColor(COLOR_BTNFACE);
+	const RawGDIDIB::Pixel buttonColor = SynMPTTheme::Color(COLOR_BTNFACE);
 	const bool isDark = mpt::Color::GetLuma(buttonColor.r, buttonColor.g, buttonColor.b) < 128;
 	if(isDark)
 	{

@@ -57,6 +57,8 @@ struct MODPLUGDIB
 	BITMAPINFOHEADER bmiHeader;
 	RGBQUAD bmiColors[16];
 	LPBYTE lpDibBits;
+    bool antialiased = false;
+    int separatorStartX = -1;
 };
 
 
@@ -359,6 +361,7 @@ protected:
 	int ExitInstance() override;
 	int ExitInstanceImpl();
 	BOOL OnIdle(LONG lCount) override;
+    BOOL PreTranslateMessage(MSG *message) override;
 	//}}AFX_VIRTUAL
 
 	// Implementation
@@ -404,6 +407,8 @@ extern CTrackApp theApp;
 //////////////////////////////////////////////////////////////////
 // More Bitmap Helpers
 
+struct BitmapTintSpan { int left, right; COLORREF color; };
+
 class CFastBitmap
 {
 protected:
@@ -417,6 +422,9 @@ protected:
 	};
 
 	MODPLUGFASTDIB m_Dib;
+    std::vector<uint16> m_coverage;
+    std::vector<uint32> m_rgbPixels;
+    bool m_smoothUsed = false;
 	UINT m_nTextColor = 0, m_nBkColor = 0;
 	MODPLUGDIB *m_pTextDib;
 	uint8 m_nBlendOffset = 0;
@@ -428,7 +436,7 @@ public:
 
 public:
 	void Init(MODPLUGDIB *lpTextDib = nullptr);
-	void Blit(HDC hdc, int x, int y, int cx, int cy);
+	void Blit(HDC hdc, int x, int y, int cx, int cy, const std::vector<BitmapTintSpan> &tints = {});
 	void Blit(HDC hdc, LPCRECT lprc) { Blit(hdc, lprc->left, lprc->top, lprc->right - lprc->left, lprc->bottom - lprc->top); }
 	void SetTextColor(int nText, int nBk = -1)
 	{
