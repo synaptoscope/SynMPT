@@ -4,13 +4,39 @@
 
 OPENMPT_NAMESPACE_BEGIN
 namespace SynMPTChecks {
-struct ChromeFrameState { HWND client=nullptr; int nativeHover=0; int nativeDraw=0; };
+struct ChromeFrameState
+{
+    HWND client=nullptr;
+    int nativeHover=0, nativeDraw=0, captionPaint=0, nativeButtonDown=0;
+    bool probeCaption=false, activationPaint=false;
+    UINT command=0;
+};
 inline LRESULT CALLBACK ChromeFrameProc(HWND window,UINT message,WPARAM wParam,LPARAM lParam)
 {
     if(message==WM_NCCREATE)::SetWindowLongPtr(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCT *>(lParam)->lpCreateParams));
     auto *state=reinterpret_cast<ChromeFrameState *>(::GetWindowLongPtr(window,GWLP_USERDATA));
     if(state && message==WM_NCMOUSEMOVE)state->nativeHover++;
     if(state && message==WM_DRAWITEM)state->nativeDraw++;
+    if(state && state->probeCaption)
+    {
+        if(message == WM_NCPAINT)
+        {
+            TITLEBARINFOEX title{}; title.cbSize=sizeof(title);
+            ::SendMessage(window,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
+            if(wParam == 1 || (wParam && ::RectInRegion(reinterpret_cast<HRGN>(wParam), &title.rcTitleBar))) state->captionPaint++;
+        }
+        // MFC's CFrameWnd rewrites WM_NCACTIVATE's lParam to zero. Reproduce
+        // that here; merely forwarding the documented -1 parameter is insufficient.
+        if(message == WM_NCACTIVATE)
+        {
+            state->activationPaint = (::GetWindowLongPtr(window,GWL_STYLE) & WS_VISIBLE) != 0;
+            return ::DefWindowProc(window,message,wParam,0);
+        }
+        if((message == WM_NCLBUTTONDOWN || message == WM_NCLBUTTONDBLCLK)
+            && (wParam == HTMINBUTTON || wParam == HTMAXBUTTON || wParam == HTCLOSE))
+        { state->nativeButtonDown++; return 0; } // Don't enter a blocking native tracking loop in the fixture.
+        if(message == WM_SYSCOMMAND) { state->command = static_cast<UINT>(wParam) & 0xFFF0; return 0; }
+    }
     return state && state->client ? ::DefFrameProcW(window,state->client,message,wParam,lParam) : ::DefWindowProcW(window,message,wParam,lParam);
 }
 inline LRESULT CALLBACK ChromeComboProbe(HWND window,UINT message,WPARAM wParam,LPARAM lParam,UINT_PTR,DWORD_PTR data)
@@ -79,6 +105,75 @@ inline void CheckHoverChrome(std::ostream &log)
     check(state.nativeHover==0 && nativeMoves==0,"themed title/selector hover does not invoke competing native text painters");
     check(::SendMessage(combo,CB_GETCURSEL,0,0)==0,"hover leaves the instrument selection unchanged");
     ::RemoveWindowSubclass(combo,ChromeComboProbe,0x53435052);
+    // No desktop input or capture: exercise the caption state machine on owned
+    // native main/tool windows. The lower probe deliberately rewrites activation
+    // like MFC and prevents accidental blocking/native button tracking.
+    const auto checkCaption = [&](HWND target, ChromeFrameState &probe, bool tool) {
+        probe.probeCaption=true;
+        ::SendMessage(target,WM_NCPAINT,1,0);
+        const bool exclusivePaint=probe.captionPaint==0;
+        log << "Caption painter exclusions: " << (exclusivePaint ? "PASS" : "FAIL") << '\n';log.flush();
+        const auto style=::GetWindowLongPtr(target,GWL_STYLE);
+        ::SetWindowLongPtr(target,GWL_STYLE,style | WS_VISIBLE);
+        ::SendMessage(target,WM_NCACTIVATE,TRUE,0);
+        const bool visibilityRestored=(::GetWindowLongPtr(target,GWL_STYLE)&WS_VISIBLE)!=0;
+        ::SetWindowLongPtr(target,GWL_STYLE,style);
+        log << "MFC activation repaint suppression: " << (!probe.activationPaint && visibilityRestored ? "PASS" : "FAIL") << '\n';log.flush();
+        check(exclusivePaint,"native nonclient repaint must exclude the custom caption and buttons");
+        check(!probe.activationPaint && visibilityRestored,"MFC activation may not repaint the classic caption; visibility must be restored");
+        ::SendMessage(target,WM_NCACTIVATE,FALSE,0);
+        check((::GetWindowLongPtr(target,GWL_STYLE)&WS_VISIBLE)==(style&WS_VISIBLE),"activation preserves initially hidden windows");
+
+        TITLEBARINFOEX title{};title.cbSize=sizeof(title);::SendMessage(target,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
+        const auto dispatchCommand = [&] {
+            MSG queued{};
+            while(::PeekMessage(&queued,target,WM_SYSCOMMAND,WM_SYSCOMMAND,PM_REMOVE)) ::DispatchMessage(&queued);
+        };
+        const auto pressButton = [&](int part,int hit) {
+            const auto screen=CRect(title.rgrect[part]).CenterPoint();
+            ::SendMessage(target,WM_NCLBUTTONDOWN,hit,MAKELPARAM(screen.x,screen.y));
+            check(::GetCapture()==target,"themed caption button owns mouse capture");
+            POINT client=screen;::ScreenToClient(target,&client);return client;
+        };
+        for(auto [part,hit,command] : {std::tuple{2,HTMINBUTTON,SC_MINIMIZE},std::tuple{3,HTMAXBUTTON,SC_MAXIMIZE},std::tuple{5,HTCLOSE,SC_CLOSE}})
+        {
+            if(tool && part!=5) continue;
+            probe.command=0;
+            const auto client=pressButton(part,hit);
+            ::SendMessage(target,WM_LBUTTONUP,0,MAKELPARAM(client.x,client.y));dispatchCommand();
+            check(probe.command==static_cast<UINT>(command),"themed caption button invokes its original system command");
+            check(::GetCapture()!=target,"caption button releases mouse capture after command");
+        }
+        // Release away from the button, Escape and capture loss must not issue Close.
+        for(int cancel : {0,1,2,3})
+        {
+            probe.command=0;pressButton(5,HTCLOSE);
+            if(cancel==0) ::SendMessage(target,WM_LBUTTONUP,0,MAKELPARAM(20,40));
+            if(cancel==1)
+            {
+                MSG escape{}; escape.hwnd=combo; escape.message=WM_KEYDOWN; escape.wParam=VK_ESCAPE;
+                check(SynMPTTheme::HandleKeyMessage(escape),"Escape from a focused child cancels caption tracking before editor shortcuts");
+            }
+            if(cancel==2) ::SendMessage(target,WM_CAPTURECHANGED,0,0);
+            if(cancel==3) ::SendMessage(target,WM_CANCELMODE,0,0);
+            dispatchCommand();
+            check(probe.command==0 && ::GetCapture()!=target,"cancelled caption button never closes the window or keeps capture");
+        }
+        // Native movement/layout notifications must not reopen the classic painter.
+        ::SendMessage(target,WM_ENTERSIZEMOVE,0,0);
+        ::SetWindowPos(target,nullptr,30,40,500,250,SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
+        ::SendMessage(target,WM_NCPAINT,1,0);
+        ::SendMessage(target,WM_EXITSIZEMOVE,0,0);
+        check(probe.captionPaint==0 && probe.nativeButtonDown==0,"move/size and button tracking retain exclusive caption painting");
+        probe.probeCaption=false;
+        log << "PASS: " << (tool ? "floating tool" : "main frame") << " caption paint isolation, MFC activation, button commands, release-away/Escape/capture-loss cancellation and move/size notifications\n";
+    };
+    checkCaption(frame,state,false);
+    ChromeFrameState toolState;
+    const auto tool=::CreateWindowExW(WS_EX_TOOLWINDOW,frameType.lpszClassName,L"Transport fixture",WS_POPUP|WS_CAPTION|WS_SYSMENU,
+        0,0,400,80,frame,nullptr,AfxGetInstanceHandle(),&toolState);
+    check(tool!=nullptr,"create owned floating caption fixture");
+    SynMPTTheme::RegisterWindow(tool);checkCaption(tool,toolState,true);::DestroyWindow(tool);
     ::DestroyWindow(frame);::UnregisterClassW(childType.lpszClassName,AfxGetInstanceHandle());::UnregisterClassW(frameType.lpszClassName,AfxGetInstanceHandle());
     log<<"PASS: native maximized MDI button rendering/command identity, caption/selector hover ownership and instrument selection stability\n";
 }

@@ -2,6 +2,7 @@
 #pragma once
 #include "../../mptrack/WindowMessages.h"
 #include <chrono>
+#include "paint_ownership.h"
 
 OPENMPT_NAMESPACE_BEGIN
 namespace SynMPTChecks {
@@ -64,10 +65,12 @@ inline int RunEditorSwitches(CMainFrame &main, const mpt::PathString &directory)
             check((document->IsModified() != FALSE) == modified, "switching editors does not change the song");
         };
         double worst = 0;
+        bool paintOwnership = true;
         for(int round = 0; round < 8; round++) for(int index = 0; index < 5; index++)
         {
             const auto start = std::chrono::steady_clock::now();
             choose(index); drain(); verify();
+            if(round == 0) paintOwnership = CheckEditorPaintOwnership(*control, *frame, log) && paintOwnership;
             const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             worst = std::max(worst, elapsed);
             if(round == 0) { log << "FIRST OPEN: tab " << index << " " << elapsed << " ms\n"; log.flush(); }
@@ -77,6 +80,7 @@ inline int RunEditorSwitches(CMainFrame &main, const mpt::PathString &directory)
             choose(0); choose(2); choose(1); drain(); verify();
             check(control->GetActivePage() == CModControlView::Page::Patterns, "rapid changes settle on the final requested tab");
         }
+        check(paintOwnership, "editor backgrounds must preserve the controls and tabs they overlap");
         log << "PASS: 40 settled switches and 24 queued rapid switches across Song/Patterns/Samples/Instruments/Comments; correct views, layouts, visibility and unchanged song\n";
         log << "Longest settled switch: " << worst << " ms (hidden test process, not a desktop smoothness measurement)\nALL CHECKS PASSED\n";
         log.flush(); return 0;

@@ -12,7 +12,7 @@ COLORREF Mix(COLORREF background, COLORREF accent, unsigned percent);
 void DrawScrollBar(HDC dc, const SCROLLBARINFO &info, bool vertical, bool hot);
 void RegisterWindow(HWND window);
 void RefreshWindows();
-bool HandleTransportKey(const MSG &message);
+bool HandleKeyMessage(const MSG &message);
 void DrawAction(HDC dc, const RECT &rect, const wchar_t *label, COLORREF accent, bool active, bool recordDot = false);
 }
 OPENMPT_NAMESPACE_END

@@ -655,7 +655,7 @@ LRESULT CALLBACK CMainFrame::FocusChangeProc(int code, WPARAM wParam, LPARAM lPa
 
 BOOL CMainFrame::PreTranslateMessage(MSG *pMsg)
 {
-    if(SynMPTTheme::HandleTransportKey(*pMsg)) return TRUE;
+    if(SynMPTTheme::HandleKeyMessage(*pMsg)) return TRUE;
 	// Right-click menu to disable/enable tree view and main toolbar when right-clicking on either the menu strip or main toolbar
 	if((pMsg->message == WM_RBUTTONUP) || (pMsg->message == WM_NCRBUTTONUP))
 	{

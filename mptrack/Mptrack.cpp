@@ -2091,7 +2091,7 @@ static void TimeoutSplashScreen()
 
 BOOL CTrackApp::PreTranslateMessage(MSG *message)
 {
-    if(message && SynMPTTheme::HandleTransportKey(*message)) return TRUE;
+    if(message && SynMPTTheme::HandleKeyMessage(*message)) return TRUE;
     return CWinApp::PreTranslateMessage(message);
 }
 
@@ -3080,7 +3080,7 @@ namespace
 std::vector<HWND> roots;
 std::wstring Class(HWND window) { wchar_t name[128]{}; ::GetClassNameW(window, name, 128); return name; }
 constexpr UINT_PTR ThemeSubclassID = 0x53594E54;
-struct CaptionHover { int hit=0; bool tracking=false; };
+struct CaptionHover { int hit=0, pressed=0; bool tracking=false; };
 std::map<HWND,CaptionHover> captionHover;
 std::map<HWND,bool> comboHover;
 
@@ -3110,7 +3110,7 @@ public:
     }
 };
 
-void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled);
+void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled, bool pressed = false);
 struct MenuEntry { HMENU menu; std::wstring text; bool bar, separator, submenu; HBITMAP bitmap = nullptr; };
 std::map<ULONG_PTR, std::unique_ptr<MenuEntry>> menuEntries;
 
@@ -3199,6 +3199,38 @@ bool MenuMessage(HWND window, UINT message, WPARAM, LPARAM lParam, LRESULT &resu
 }
 
 
+// Background painters also receive caller-owned DCs (WM_PRINTCLIENT/ERASEBKGND).
+// Clip explicitly rather than assuming BeginPaint or WS_CLIPCHILDREN did it.
+// Splitters deliberately lack WS_CLIPCHILDREN so their drag tracker can cross panes.
+void ExcludeVisibleChildren(HWND window, HDC dc)
+{
+    for(auto child = ::GetWindow(window, GW_CHILD); child; child = ::GetWindow(child, GW_HWNDNEXT))
+    {
+        if(!(::GetWindowLongPtr(child, GWL_STYLE) & WS_VISIBLE)) continue;
+        RECT rect{}; ::GetWindowRect(child, &rect);
+        ::MapWindowPoints(nullptr, window, reinterpret_cast<POINT *>(&rect), 2);
+        ::ExcludeClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
+    }
+}
+
+void ExcludeOverlappingSiblings(HWND window, HDC dc, bool group)
+{
+    RECT bounds{}; ::GetClientRect(window, &bounds);
+    // Group boxes are decorative siblings, not parents of the controls inside
+    // them. Their background must preserve those controls regardless of z-order.
+    // Tabs instead preserve the pages/controls stacked above their display area.
+    auto sibling = group ? ::GetWindow(::GetParent(window), GW_CHILD) : ::GetWindow(window, GW_HWNDPREV);
+    for(; sibling; sibling = ::GetWindow(sibling, group ? GW_HWNDNEXT : GW_HWNDPREV))
+    {
+        if(sibling == window || !(::GetWindowLongPtr(sibling, GWL_STYLE) & WS_VISIBLE)) continue;
+        RECT rect{}; ::GetWindowRect(sibling, &rect);
+        ::MapWindowPoints(nullptr, window, reinterpret_cast<POINT *>(&rect), 2);
+        // An enclosing tab or outer group supplies a background, not foreground content.
+        if(group && rect.left <= bounds.left && rect.top <= bounds.top && rect.right >= bounds.right && rect.bottom >= bounds.bottom) continue;
+        ::ExcludeClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
+    }
+}
+
 void PaintButton(HWND window, HDC dc)
 {
     RECT bounds{}; ::GetClientRect(window, &bounds); CRect rect(bounds);
@@ -3207,6 +3239,7 @@ void PaintButton(HWND window, HDC dc)
     const bool check = type == BS_CHECKBOX || type == BS_AUTOCHECKBOX || type == BS_3STATE || type == BS_AUTO3STATE;
     const bool radio = type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON;
     const bool group = type == BS_GROUPBOX;
+    if(group) ExcludeOverlappingSiblings(window, dc, true);
     const bool enabled = ::IsWindowEnabled(window) != FALSE;
     const auto state = ::SendMessage(window, BM_GETSTATE, 0, 0);
     const bool pressed = (state & BST_PUSHED) != 0;
@@ -3409,9 +3442,11 @@ void CALLBACK ScrollTimerProc(HWND window, UINT, UINT_PTR, DWORD) { PaintScrollB
 
 void PaintTabs(HWND window, HDC dc)
 {
+    const int saved = ::SaveDC(dc);
+    ExcludeVisibleChildren(window, dc);
+    ExcludeOverlappingSiblings(window, dc, false);
     RECT bounds{}; ::GetClientRect(window, &bounds);
     ::FillRect(dc, &bounds, Brush(COLOR_BTNFACE));
-    const int saved = ::SaveDC(dc);
     const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
     const int selected = TabCtrl_GetCurSel(window);
     const int dpi = HighDPISupport::GetDpiForWindow(window), padding = MulDiv(6, dpi, 96);
@@ -3615,16 +3650,16 @@ void PaintSpinner(HWND window, HDC dc)
     ::RestoreDC(dc,saved);
 }
 
-void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled)
+void DrawCaptionButton(HDC dc, CRect rect, UINT command, bool hot, bool disabled, bool pressed)
 {
-    ::FillRect(dc,rect,Brush(hot ? COLOR_3DLIGHT : COLOR_ACTIVECAPTION));
+    ::FillRect(dc,rect,Brush(pressed ? COLOR_HIGHLIGHT : hot ? COLOR_3DLIGHT : COLOR_ACTIVECAPTION));
     const int saved=::SaveDC(dc);
     ::SelectObject(dc,GetStockObject(DC_PEN));::SelectObject(dc,GetStockObject(NULL_BRUSH));
     ::SetDCPenColor(dc,Color(disabled ? COLOR_GRAYTEXT : COLOR_CAPTIONTEXT));
     const auto center=rect.CenterPoint();const int size=std::max(3,std::min(rect.Width(),rect.Height())/5);
     if(command==SC_CLOSE)
     {
-        if(hot) { ::SetDCBrushColor(dc,RGB(179,63,78));::FillRect(dc,rect,GetStockBrush(DC_BRUSH)); }
+        if(hot || pressed) { ::SetDCBrushColor(dc,pressed ? RGB(136,44,57) : RGB(179,63,78));::FillRect(dc,rect,GetStockBrush(DC_BRUSH)); }
         ::MoveToEx(dc,center.x-size,center.y-size,nullptr);::LineTo(dc,center.x+size+1,center.y+size+1);
         ::MoveToEx(dc,center.x+size,center.y-size,nullptr);::LineTo(dc,center.x-size-1,center.y+size+1);
     } else if(command==SC_MINIMIZE)
@@ -3681,7 +3716,8 @@ void PaintNonClient(HWND window)
                 const bool hot=button.PtInRect(pointer)!=FALSE;
                 if(hot)captionHover[window].hit=part==2 ? HTMINBUTTON : part==3 ? HTMAXBUTTON : HTCLOSE;
                 button.OffsetRect(-screen.left,-screen.top);
-                DrawCaptionButton(paintDC,button,commands[part],hot,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0);
+                DrawCaptionButton(paintDC,button,commands[part],hot,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0,
+                    hot && captionHover[window].pressed == captionHover[window].hit);
                 caption.right=std::min(caption.right,button.left);
             }
             const int padding=MulDiv(6,HighDPISupport::GetDpiForWindow(window),96);caption.left+=padding;
@@ -3717,9 +3753,50 @@ void UpdateCaptionHover(HWND window,int hit,bool tracking)
         if((buttonHit!=old && buttonHit!=hit) || (title.rgstate[part]&(STATE_SYSTEM_INVISIBLE|STATE_SYSTEM_OFFSCREEN)))continue;
         CRect rect(title.rgrect[part]);rect.OffsetRect(-screen.left,-screen.top);if(rect.IsRectEmpty())continue;
         const UINT command=part==2 ? SC_MINIMIZE : part==5 ? SC_CLOSE : ::IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
-        PaintBuffer buffer(dc,rect);DrawCaptionButton(buffer.DC(),rect,command,buttonHit==hit,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0);
+        PaintBuffer buffer(dc,rect);DrawCaptionButton(buffer.DC(),rect,command,buttonHit==hit,(title.rgstate[part]&STATE_SYSTEM_UNAVAILABLE)!=0,
+            buttonHit==hit && state.pressed==buttonHit);
     }
     ::ReleaseDC(window,dc);
+}
+
+bool IsCaptionButton(int hit) { return hit == HTMINBUTTON || hit == HTMAXBUTTON || hit == HTCLOSE; }
+
+int CaptionButtonAt(HWND window, POINT point)
+{
+    if(!::IsWindowEnabled(window)) return 0;
+    TITLEBARINFOEX title{}; title.cbSize=sizeof(title);
+    ::SendMessage(window,WM_GETTITLEBARINFOEX,0,reinterpret_cast<LPARAM>(&title));
+    for(int part : {2,3,5})
+        if(!(title.rgstate[part] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_UNAVAILABLE)) && ::PtInRect(&title.rgrect[part],point))
+            return part==2 ? HTMINBUTTON : part==3 ? HTMAXBUTTON : HTCLOSE;
+    return 0;
+}
+
+void CancelCaptionButton(HWND window)
+{
+    const auto found=captionHover.find(window);
+    if(found==captionHover.end() || !found->second.pressed) return;
+    found->second.pressed=0;
+    if(::GetCapture()==window) ::ReleaseCapture();
+    if(::IsWindow(window)) PaintNonClient(window);
+}
+
+// CFrameWnd::OnNcActivate replaces lParam with zero before calling DefWindowProc,
+// so passing -1 through the subclass chain does not suppress classic painting.
+// Temporarily mask visibility for these short state updates without hiding the
+// HWND or suppressing redraw throughout a modal move/size loop. Preserve other
+// style changes and never turn an initially hidden window into a visible one.
+LRESULT CaptionStateWithoutNativePaint(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    const bool visible=(::GetWindowLongPtr(window,GWL_STYLE)&WS_VISIBLE)!=0;
+    if(visible) ::SetWindowLongPtr(window,GWL_STYLE,::GetWindowLongPtr(window,GWL_STYLE)&~WS_VISIBLE);
+    const auto result=::DefSubclassProc(window,message,wParam,lParam);
+    if(::IsWindow(window))
+    {
+        if(visible) ::SetWindowLongPtr(window,GWL_STYLE,::GetWindowLongPtr(window,GWL_STYLE)|WS_VISIBLE);
+        PaintNonClient(window);
+    }
+    return result;
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
@@ -3748,9 +3825,68 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             UpdateComboHover(window,message==WM_MOUSEMOVE);return 0;
         }
     }
-    if(captioned && message==WM_NCACTIVATE && !::IsIconic(window))
+    if(captioned && !::IsIconic(window))
     {
-        const auto result=::DefSubclassProc(window,message,wParam,-1);PaintNonClient(window);return result;
+        if(message==WM_NCPAINT)
+        {
+            // The app owns the complete caption and frame. Only the native menu
+            // still needs its normal layout/owner-draw route; never let its paint
+            // region include the caption buttons, even during drag/resize.
+            MENUBARINFO menu{}; menu.cbSize=sizeof(menu);
+            if(::GetMenuBarInfo(window,OBJID_MENU,0,&menu) && !::IsRectEmpty(&menu.rcBar))
+            {
+                const auto region=::CreateRectRgnIndirect(&menu.rcBar);
+                if(region)
+                {
+                    if(wParam && wParam!=1) ::CombineRgn(region,region,reinterpret_cast<HRGN>(wParam),RGN_AND);
+                    ::DefSubclassProc(window,message,reinterpret_cast<WPARAM>(region),lParam);
+                    ::DeleteObject(region);
+                }
+            }
+            if(::IsWindow(window)) PaintNonClient(window);
+            return 0;
+        }
+        if(message==WM_NCACTIVATE || message==WM_SETTEXT || message==WM_SETICON || message==WM_ENABLE)
+            return CaptionStateWithoutNativePaint(window,message,wParam,lParam);
+        if((message==WM_NCLBUTTONDOWN || message==WM_NCLBUTTONDBLCLK) && IsCaptionButton(static_cast<int>(wParam)))
+        {
+            const POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+            const int hit=CaptionButtonAt(window,point);
+            if(hit)
+            {
+                captionHover[window].pressed=hit;
+                ::SetCapture(window);
+                if(::GetCapture()!=window) captionHover[window].pressed=0;
+                PaintNonClient(window);
+            }
+            return 0; // Never enter Windows' classic caption-button tracking painter.
+        }
+        const auto pressed=captionHover.find(window);
+        if(pressed!=captionHover.end() && pressed->second.pressed)
+        {
+            if(message==WM_MOUSEMOVE || message==WM_LBUTTONUP)
+            {
+                POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}; ::ClientToScreen(window,&point);
+                const int hit=CaptionButtonAt(window,point);
+                if(message==WM_MOUSEMOVE) UpdateCaptionHover(window,hit,false);
+                else
+                {
+                    const int button=pressed->second.pressed;
+                    CancelCaptionButton(window);
+                    if(hit==button && ::IsWindow(window))
+                    {
+                        const UINT command=hit==HTCLOSE ? SC_CLOSE : hit==HTMINBUTTON ? SC_MINIMIZE : ::IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE;
+                        ::PostMessage(window,WM_SYSCOMMAND,command,0);
+                    }
+                }
+                return 0;
+            }
+            if(message==WM_CANCELMODE || message==WM_CAPTURECHANGED || (message==WM_KEYDOWN && wParam==VK_ESCAPE))
+            {
+                CancelCaptionButton(window);
+                if(message==WM_KEYDOWN) return 0;
+            }
+        }
     }
     LRESULT menuResult = 0;
     if(MenuMessage(window, message, wParam, lParam, menuResult)) return menuResult;
@@ -3770,11 +3906,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     if(message == WM_ERASEBKGND)
     {
+        // These painters fill their own background in the same clipped pass as
+        // the foreground. Native erasing first can wipe overlapping siblings.
+        if(cls == L"SysTabControl32" || (cls == L"Button" && (::GetWindowLongPtr(window, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX)) return TRUE;
         auto *permanent = CWnd::FromHandlePermanent(window);
-        if(cls == L"#32770" || cls == L"ToolbarWindow32" || cls == L"MDIClient" || cls == L"SysTabControl32"
+        if(cls == L"#32770" || cls == L"ToolbarWindow32" || cls == L"MDIClient"
             || (permanent && (dynamic_cast<CControlBar *>(permanent) || dynamic_cast<CFormView *>(permanent)
                 || dynamic_cast<CSplitterWnd *>(permanent))))
-        { RECT rect{}; ::GetClientRect(window, &rect); ::FillRect(reinterpret_cast<HDC>(wParam), &rect, Brush(COLOR_BTNFACE)); return TRUE; }
+        {
+            const auto dc = reinterpret_cast<HDC>(wParam); const int saved = ::SaveDC(dc);
+            ExcludeVisibleChildren(window, dc);
+            RECT rect{}; ::GetClientRect(window, &rect); ::FillRect(dc, &rect, Brush(COLOR_BTNFACE));
+            ::RestoreDC(dc, saved); return TRUE;
+        }
     }
     if((message == WM_PAINT || message == WM_PRINTCLIENT) && (cls == L"SysTabControl32" || cls == L"SysHeader32"))
     {
@@ -3818,13 +3962,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE | (message == WM_NCMOUSEMOVE ? TME_NONCLIENT : 0u), window, 0};
         ::TrackMouseEvent(&track);
     }
-    if(message == WM_PAINT && cls == L"Button")
+    if((message == WM_PAINT || message == WM_PRINTCLIENT) && cls == L"Button")
     {
         const auto style = ::GetWindowLongPtr(window, GWL_STYLE);
         if((style & BS_TYPEMASK) != BS_OWNERDRAW && !(style & (BS_BITMAP | BS_ICON)))
         {
-            PAINTSTRUCT paint{}; HDC dc = ::BeginPaint(window, &paint); const int saved = ::SaveDC(dc);
-            PaintButton(window, dc); ::RestoreDC(dc, saved); ::EndPaint(window, &paint); return 0;
+            PAINTSTRUCT paint{};
+            const auto dc = message == WM_PAINT ? ::BeginPaint(window, &paint) : reinterpret_cast<HDC>(wParam);
+            const int saved = ::SaveDC(dc);
+            PaintButton(window, dc); ::RestoreDC(dc, saved);
+            if(message == WM_PAINT) ::EndPaint(window, &paint);
+            return 0;
         }
     }
     if(message == WM_NOTIFY && reinterpret_cast<NMHDR *>(lParam)->code == NM_CUSTOMDRAW)
@@ -3865,7 +4013,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     {
         const auto frame=::GetParent(window);StyleMenu(::GetMenu(frame),true);::DrawMenuBar(frame);
     }
-    if(message == WM_NCPAINT || message == WM_NCACTIVATE || message == WM_SETTEXT)
+    if((message == WM_NCPAINT || message == WM_NCACTIVATE || message == WM_SETTEXT
+        || (captioned && (message == WM_ENTERSIZEMOVE || message == WM_EXITSIZEMOVE || message == WM_SYSCOMMAND))) && ::IsWindow(window))
         PaintNonClient(window);
     else if(message == WM_PAINT || message == WM_SIZE || message == WM_WINDOWPOSCHANGED || message == WM_SHOWWINDOW
         || message == WM_HSCROLL || message == WM_VSCROLL || message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL
@@ -3952,8 +4101,20 @@ void RefreshWindows()
     for(auto window : roots) ::EnumChildWindows(window, Apply, 0);
 }
 
-bool HandleTransportKey(const MSG &message)
+bool HandleKeyMessage(const MSG &message)
 {
+    // Capture redirects mouse input, but keys still target the focused editor.
+    // Cancel a held caption button before Escape reaches that editor or dialog.
+    if(message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE)
+    {
+        const auto captured = ::GetCapture();
+        const auto state = captionHover.find(captured);
+        if(state != captionHover.end() && state->second.pressed)
+        {
+            CancelCaptionButton(captured);
+            return true;
+        }
+    }
     if((message.message != WM_KEYDOWN && message.message != WM_KEYUP) || message.wParam != 'T'
         || (::GetKeyState(VK_CONTROL) & 0x8000) || (::GetKeyState(VK_MENU) & 0x8000) || (::GetKeyState(VK_SHIFT) & 0x8000)) return false;
     const auto cls = Class(::GetFocus());

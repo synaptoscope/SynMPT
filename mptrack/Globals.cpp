@@ -304,10 +304,16 @@ void CModControlView::RecalcLayout()
 	{
 		CRect rect = rcClient;
 		m_TabCtrl.AdjustRect(FALSE, &rect);
+		// The page is a sibling of the full-size tab control. Keep it above
+		// the tab's display area so sibling clipping never hides the page.
 		HDWP hdwp = BeginDeferWindowPos(2);
-		DeferWindowPos(hdwp, m_TabCtrl.m_hWnd, NULL, rcClient.left, rcClient.top, rcClient.Width(), rcClient.Height(), SWP_NOZORDER);
-		DeferWindowPos(hdwp, pDlg->m_hWnd, NULL, rect.left, rect.top, rect.Width(), rect.Height(), SWP_NOZORDER);
-		EndDeferWindowPos(hdwp);
+		if(hdwp) hdwp = DeferWindowPos(hdwp, m_TabCtrl.m_hWnd, HWND_BOTTOM, rcClient.left, rcClient.top, rcClient.Width(), rcClient.Height(), SWP_NOACTIVATE);
+		if(hdwp) hdwp = DeferWindowPos(hdwp, pDlg->m_hWnd, HWND_TOP, rect.left, rect.top, rect.Width(), rect.Height(), SWP_NOACTIVATE);
+		if(!hdwp || !EndDeferWindowPos(hdwp))
+		{
+			m_TabCtrl.SetWindowPos(&CWnd::wndBottom, rcClient.left, rcClient.top, rcClient.Width(), rcClient.Height(), SWP_NOACTIVATE);
+			pDlg->SetWindowPos(&CWnd::wndTop, rect.left, rect.top, rect.Width(), rect.Height(), SWP_NOACTIVATE);
+		}
 	} else
 	{
 		m_TabCtrl.MoveWindow(&rcClient);
