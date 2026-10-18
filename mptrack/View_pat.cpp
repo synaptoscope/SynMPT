@@ -4460,7 +4460,7 @@ LRESULT CViewPattern::OnMidiMsg(WPARAM dwMidiDataParam, LPARAM)
 
 	case MIDIEvents::evNoteOn:  // Note On
 		// Continue playing as soon as MIDI notes are being received
-		if((pMainFrm->GetSoundFilePlaying() != &sndFile || sndFile.IsPaused()) && midiSetup[MidiSetup::PlayPatternOnMidiNote])
+		if(IsEditingEnabled() && (pMainFrm->GetSoundFilePlaying() != &sndFile || sndFile.IsPaused()) && midiSetup[MidiSetup::PlayPatternOnMidiNote])
 		{
 			if(midiSetup[MidiSetup::PlayPatternFromStart])
 				pModDoc->OnPatternRestart(false);
@@ -4662,6 +4662,7 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 		break;
 
 	case VIEWMSG_SETRECORD:
+		if(m_Status[psRecordingEnabled] != !!lParam) StopCompositeVoices();
 		m_Status.set(psRecordingEnabled, !!lParam);
 		InvalidateRow(GetCurrentRow());
 		break;
@@ -5741,7 +5742,9 @@ void CViewPattern::TempStopNote(ModCommand::NOTE note, const bool fromMidi, bool
 	{
 		return;
 	}
-	if(StopCompositeNote(note, fromMidi, !m_stepLength || IsLiveRecord())) return;
+    const bool playOnly = ModCommand::IsNote(note) && m_playOnlyNotes[note];
+    if(ModCommand::IsNote(note)) m_playOnlyNotes.reset(note);
+	if(StopCompositeNote(note, fromMidi, !playOnly && (!m_stepLength || IsLiveRecord()))) return;
 	const CModSpecifications &specs = sndFile.GetModSpecifications();
 	Limit(note, specs.noteMin, specs.noteMax);
 
@@ -5805,7 +5808,7 @@ void CViewPattern::TempStopNote(ModCommand::NOTE note, const bool fromMidi, bool
 		return;
 	if(m_Cursor.GetColumnType() > PatternCursor::instrColumn && (chordMode || !fromMidi))
 		return;
-	if(!pModDoc || !pMainFrm || !(IsEditingEnabled()))
+	if(!pModDoc || !pMainFrm || !IsEditingEnabled() || playOnly)
 		return;
 
 	activeNoteMap[note] = NOTE_CHANNEL_MAP_INVALID;  //unlock channel
@@ -6019,25 +6022,27 @@ void CViewPattern::TempEnterIns(int val)
 bool CViewPattern::EnterCompositeNote(ModCommand::NOTE note, int volume, bool fromMidi)
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile(); const auto current = GetCurrentChannel();
-    const bool armed = m_armedComposite < file.GetNumChannels() && file.ChnSettings[m_armedComposite].isBus
-        && file.ChnSettings[m_armedComposite].compositeInput;
-    const bool inFolder = armed && (current == m_armedComposite || TrackBelongsToBus(file.ChnSettings, current, m_armedComposite));
+    const auto bus = !IsEditingEnabled() && current < file.GetNumChannels() && file.ChnSettings[current].isBus
+        && file.ChnSettings[current].compositeInput ? current : m_armedComposite;
+    const bool armed = bus < file.GetNumChannels() && file.ChnSettings[bus].isBus
+        && file.ChnSettings[bus].compositeInput;
+    const bool inFolder = armed && (current == bus || TrackBelongsToBus(file.ChnSettings, current, bus));
     if(!inFolder)
     {
         if(current < file.GetNumChannels() && file.ChnSettings[current].isBus)
-        { CMainFrame::GetMainFrame()->SetInfoText(_T("Arm the folder's R button to use its composite instrument.")); return true; }
+        { CMainFrame::GetMainFrame()->SetInfoText(_T("Choose Play only to audition, or arm the folder's record button to enter composite notes.")); return true; }
         return false;
     }
     if(note == NOTE_NONE) return true;
     if(ModCommand::IsPcNote(note)) return false;
     const bool special = !ModCommand::IsNote(note);
-    auto routes = ResolveCompositeInput(file.ChnSettings, m_armedComposite, note);
+    auto routes = ResolveCompositeInput(file.ChnSettings, bus, note);
     if(special)
     {
         StopCompositeVoices();
         if(!file.GetModSpecifications().HasNote(note)) return true;
         for(CHANNELINDEX track = 0; track < file.GetNumChannels(); track++)
-            if(!file.ChnSettings[track].isBus && file.ChnSettings[track].inputEnabled && TrackBelongsToBus(file.ChnSettings, track, m_armedComposite))
+            if(!file.ChnSettings[track].isBus && file.ChnSettings[track].inputEnabled && TrackBelongsToBus(file.ChnSettings, track, bus))
                 routes.push_back({track, note, 0});
     }
     if(routes.empty())
@@ -6074,16 +6079,7 @@ bool CViewPattern::EnterCompositeNote(ModCommand::NOTE note, int volume, bool fr
     {
         for(const auto &event : accepted)
         {
-            auto params = PlayNoteParam(event.note).Instrument(event.instrument).Volume(volume < 0 ? -1 : 4 * volume).Channel(event.channel);
-            const auto preview = doc->PlayNote(params);
-            if(preview < MAX_CHANNELS)
-            {
-                CriticalSection cs; auto &voice = file.m_PlayState.Chn[preview];
-                voice.nGlobalVol = file.m_PlayState.Chn[event.channel].nGlobalVol;
-                voice.nPan = file.m_PlayState.Chn[event.channel].nPan;
-                voice.dwFlags.set(CHN_MUTE, doc->IsChannelMuted(event.channel));
-            }
-            m_compositeVoices[note].push_back({event.channel, preview, event.note, event.instrument});
+            m_compositeVoices[note].push_back(PlayCompositePreview(*doc, event, volume < 0 ? -1 : 4 * volume));
         }
     } else if(!special)
         for(const auto &event : accepted) m_compositeVoices[note].push_back({event.channel, CHANNELINDEX_INVALID, event.note, event.instrument});
@@ -6117,8 +6113,7 @@ bool CViewPattern::StopCompositeNote(ModCommand::NOTE note, bool fromMidi, bool 
     {
         if(voice.preview < MAX_CHANNELS)
         {
-            const auto &preview = file.m_PlayState.Chn[voice.preview];
-            if(preview.isPreviewNote && preview.nMasterChn == voice.track + 1u && preview.nNewNote == voice.note)
+            if(OwnsCompositePreview(*doc, voice))
                 doc->NoteOff(voice.note, settings[PatternSetup::NoteFadeOnKeyUp] || file.GetNumInstruments() == 0, voice.instrument, voice.preview);
         }
         if(!record || voice.track >= file.GetNumChannels() || !file.Patterns.IsValidPat(position.pattern)
@@ -6154,6 +6149,7 @@ void CViewPattern::TempEnterNote(ModCommand::NOTE note, int vol, bool fromMidi)
 		return;
 	}
 
+    if(ModCommand::IsNote(note)) m_playOnlyNotes.set(note, !IsEditingEnabled());
     if(ComposerStepNote(note, vol)) return;
 	if(EnterCompositeNote(note, vol, fromMidi)) return;
 	if(note < NOTE_MIN_SPECIAL)
@@ -6350,7 +6346,7 @@ void CViewPattern::TempEnterNote(ModCommand::NOTE note, int vol, bool fromMidi)
 	// -- play note
 	if((patternSetup[PatternSetup::PlayNewNotesWhileRecording | PatternSetup::PlayRowOnNoteEntry] || !recordEnabled) && !newcmd.IsPcNote())
 	{
-		const bool playWholeRow = patternSetup[PatternSetup::PlayRowOnNoteEntry] && !liveRecord;
+		const bool playWholeRow = recordEnabled && patternSetup[PatternSetup::PlayRowOnNoteEntry] && !liveRecord;
 		if(playWholeRow)
 		{
 			// play the whole row in "step mode"
@@ -6658,7 +6654,7 @@ void CViewPattern::TempEnterChord(ModCommand::NOTE note)
 			TempStopChord(m_prevChordNote);
 		}
 
-		const bool playWholeRow = patternSetup[PatternSetup::PlayRowOnNoteEntry] && !liveRecord;
+		const bool playWholeRow = recordEnabled && patternSetup[PatternSetup::PlayRowOnNoteEntry] && !liveRecord;
 		if(playWholeRow)
 		{
 			// play the whole row in "step mode"

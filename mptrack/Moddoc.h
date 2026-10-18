@@ -134,6 +134,9 @@ protected:
 	SplitKeyboardSettings m_SplitKeyboardSettings;	// this is maybe not the best place to keep them, but it should do the job
 	mpt::chrono::default_system_clock::time_point m_creationTime;
 
+    std::array<uint64, MAX_CHANNELS> m_previewNoteIds{};
+    uint64 m_nextPreviewNoteId = 0;
+
 	std::atomic<bool> m_modifiedAutosave = false; // Modified since last autosave?
 
 public:
@@ -143,6 +146,7 @@ public:
 		NoteToChannelMap() { fill(CHANNELINDEX_INVALID); }
 	};
 	NoteToChannelMap m_noteChannel;	// Note -> Preview channel assignment
+    uint64 GetPreviewNoteId(CHANNELINDEX channel) const { return channel < MAX_CHANNELS ? m_previewNoteIds[channel] : 0; }
 
     mpt::PathString m_conversionSource;
     bool MakeNativeProject();

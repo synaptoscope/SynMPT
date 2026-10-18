@@ -1154,6 +1154,7 @@ CHANNELINDEX CModDoc::PlayNote(PlayNoteParam &params, NoteToChannelMap *noteChan
 		}
 		chn.nFadeOutVol = 0x10000;
 		chn.isPreviewNote = true;
+        m_previewNoteIds[channel] = ++m_nextPreviewNoteId;
 		if(params.m_currentChannel != CHANNELINDEX_INVALID)
 			chn.nMasterChn = params.m_currentChannel + 1;
 		else

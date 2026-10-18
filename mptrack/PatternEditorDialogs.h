@@ -21,6 +21,8 @@
 #include "PluginComboBox.h"
 #include "ResizableDialog.h"
 #include "TrackerSettings.h"
+#include "CompositeAudition.h"
+#include <functional>
 
 OPENMPT_NAMESPACE_BEGIN
 
@@ -31,7 +33,8 @@ class CCompositeInputDlg;
 class CCompositeKeyboard : public CWnd
 {
     CCompositeInputDlg *m_owner = nullptr;
-    int m_anchor = -1;
+    int m_anchor = -1, m_sounding = -1;
+    void ReleaseMouseNote();
     bool m_add = false, m_remove = false;
     std::array<uint8, 15> m_before{};
     int HitKey(CPoint point) const;
@@ -45,7 +48,8 @@ protected:
     afx_msg void OnLButtonDown(UINT flags, CPoint point);
     afx_msg void OnMouseMove(UINT flags, CPoint point);
     afx_msg void OnLButtonUp(UINT, CPoint);
-    afx_msg void OnCaptureChanged(CWnd *) { m_anchor = -1; }
+    afx_msg void OnCaptureChanged(CWnd *);
+    afx_msg UINT OnGetDlgCode() { return DLGC_WANTARROWS | DLGC_WANTCHARS; }
     DECLARE_MESSAGE_MAP()
 public:
     void Init(CCompositeInputDlg *owner, UINT id);
@@ -64,8 +68,23 @@ public:
 class CCompositeInputDlg : public DialogBase
 {
     friend class CCompositeKeyboard;
+    friend class CViewPattern; // Integration checks exercise the actual dialog and preview voices.
     CCompositeKeyboard m_keyboard;
-    CComboBox m_fixed;
+    CComboBox m_fixed, m_root;
+    struct AuditionVoice { unsigned source; ModCommand::NOTE input; CompositePreviewVoice voice; bool held = true; };
+    std::vector<AuditionVoice> m_voices;
+    std::array<bool, 16> m_sustain{};
+    std::array<ModCommand::NOTE, 256> m_keyNotes{};
+    UINT m_virtualKey = 0;
+    HWND m_previousMidi = nullptr;
+    std::function<void(mpt::const_byte_span)> m_previousSysEx;
+    bool m_mapMode = true, m_acceptMidi = true;
+    int FirstMappedKey() const;
+    void UpdatePitchControls();
+    void Audition(unsigned source, ModCommand::NOTE note, int volume = -1, bool selectedOnly = false);
+    void ReleaseNote(unsigned source, ModCommand::NOTE note, bool force = false);
+    void StopAudition();
+    void RestoreMidiTarget();
     bool m_loading = false;
     CModDoc &m_doc;
     CHANNELINDEX m_bus;
@@ -73,11 +92,20 @@ class CCompositeInputDlg : public DialogBase
     int m_selected = -1;
     CListBox m_list;
     CComboBox m_instrument, m_low, m_high;
-    bool StoreLane();
+    bool StoreLane(bool notify = true);
     void LoadLane();
 protected:
     BOOL OnInitDialog() override;
     void OnOK() override;
+    void OnCancel() override;
+    BOOL PreTranslateMessage(MSG *msg) override;
+    afx_msg LRESULT OnKeyCommand(WPARAM command, LPARAM);
+    afx_msg LRESULT OnMidiMsg(WPARAM data, LPARAM);
+    afx_msg void OnDestroy();
+    afx_msg void OnActivate(UINT state, CWnd *other, BOOL minimized);
+    afx_msg void OnModeChanged();
+    afx_msg void OnPitchChanged();
+    afx_msg void OnRootChanged();
     afx_msg void OnLaneChanged();
     afx_msg void OnSpread();
     afx_msg void OnRangeChanged();

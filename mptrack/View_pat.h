@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "CompositeAudition.h"
 #include "openmpt/all/BuildSettings.hpp"
 
 #include "Globals.h"
@@ -219,7 +220,8 @@ protected:
 	std::vector<ChannelState> m_chnState;
     CHANNELINDEX m_armedComposite = CHANNELINDEX_INVALID;
     CHANNELINDEX m_lastVisibleTrack = 0;
-    struct CompositeVoice { CHANNELINDEX track, preview; ModCommand::NOTE note; uint16 instrument; };
+    using CompositeVoice = CompositePreviewVoice;
+    std::bitset<NOTE_MAX + 1> m_playOnlyNotes;
     std::array<std::vector<CompositeVoice>, NOTE_MAX + 1> m_compositeVoices;
     bool EnterCompositeNote(ModCommand::NOTE note, int volume, bool fromMidi);
     bool StopCompositeNote(ModCommand::NOTE note, bool fromMidi, bool writeRelease = true);

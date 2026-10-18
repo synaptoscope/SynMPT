@@ -52,6 +52,7 @@ BEGIN_MESSAGE_MAP(CCtrlPatterns, CModControlDlg)
 	ON_COMMAND(IDC_PATTERN_PLAY,              &CCtrlPatterns::OnPatternPlay)
 	ON_COMMAND(IDC_PATTERN_PLAYFROMSTART,     &CCtrlPatterns::OnPatternPlayFromStart)
 	ON_COMMAND(IDC_PATTERN_RECORD,            &CCtrlPatterns::OnPatternRecord)
+    ON_COMMAND(IDC_COMPOSER_PLAY_ONLY, &CCtrlPatterns::OnPatternRecord)
 	ON_COMMAND(IDC_METRONOME,                 &CCtrlPatterns::OnToggleMetronome)
 	ON_COMMAND(ID_METRONOME_SETTINGS,         &CCtrlPatterns::OnMetronomeSettings)
 	ON_COMMAND(IDC_PATTERN_LOOP,              &CCtrlPatterns::OnChangeLoopStatus)
@@ -154,6 +155,7 @@ BOOL CCtrlPatterns::OnInitDialog()
 	m_ToolBar.AddButton(IDC_PATTERN_PLAYFROMSTART, TIMAGE_PATTERN_RESTART);
 	m_ToolBar.AddButton(IDC_PATTERN_STOP, TIMAGE_PATTERN_STOP);
 	m_ToolBar.AddButton(ID_PATTERN_PLAYROW, TIMAGE_PATTERN_PLAYROW);
+    CheckDlgButton(IDC_COMPOSER_PLAY_ONLY, m_bRecord ? BST_UNCHECKED : BST_CHECKED);
 	m_ToolBar.AddButton(IDC_PATTERN_RECORD, TIMAGE_PATTERN_RECORD, TBSTYLE_CHECK, (m_bRecord ? TBSTATE_CHECKED : 0) | TBSTATE_ENABLED);
 	m_ToolBar.AddButton(IDC_METRONOME, TIMAGE_METRONOME, TBSTYLE_CHECK | TBSTYLE_DROPDOWN, (TrackerSettings::Instance().metronomeEnabled ? TBSTATE_CHECKED : 0) | TBSTATE_ENABLED);
 	m_ToolBar.AddButton(ID_SEPARATOR, 0, TBSTYLE_SEP);
@@ -485,6 +487,7 @@ LRESULT CCtrlPatterns::OnModCtrlMsg(WPARAM wParam, LPARAM lParam)
 		else
 			m_bRecord = !m_bRecord;
 		m_ToolBar.CheckButton(IDC_PATTERN_RECORD, m_bRecord ? TRUE : FALSE);
+        CheckDlgButton(IDC_COMPOSER_PLAY_ONLY, m_bRecord ? BST_UNCHECKED : BST_CHECKED);
 		TrackerSettings::Instance().gbPatternRecord = m_bRecord;
 		SendViewMessage(VIEWMSG_SETRECORD, m_bRecord);
 		break;
@@ -1087,6 +1090,7 @@ void CCtrlPatterns::OnPatternRecord()
 	m_bRecord = !m_bRecord;
 	TrackerSettings::Instance().gbPatternRecord = m_bRecord;
 	m_ToolBar.CheckButton(IDC_PATTERN_RECORD, m_bRecord ? TRUE : FALSE);
+        CheckDlgButton(IDC_COMPOSER_PLAY_ONLY, m_bRecord ? BST_UNCHECKED : BST_CHECKED);
 	SendViewMessage(VIEWMSG_SETRECORD, m_bRecord);
 	SwitchToViewIfMouse();
 }

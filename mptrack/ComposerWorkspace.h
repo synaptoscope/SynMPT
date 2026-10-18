@@ -467,19 +467,60 @@ void CViewPattern::RunComposerChecks(const mpt::PathString &directory)
     const auto recalled=file.ChnSettings[4].trackInstrument;
     check(recalled!=file.ChnSettings[1].trackInstrument && file.Instruments[recalled],"preset uses independent instrument slots");
     const auto copiedSample=file.Instruments[recalled]->Keyboard[0]; check(copiedSample!=1 && file.GetSample(copiedSample).sample8()[4]==sample.sample8()[4],"preset embeds and copies sample data");
+    const auto previousMidi = CMainFrame::GetMainFrame()->GetMidiRecordWnd();
+    const bool wasModified = doc->IsModified() != FALSE; doc->SetModified(false);
+    const auto patternBeforeAudition = std::vector<ModCommand>(file.Patterns[0].begin(), file.Patterns[0].end());
     CCompositeInputDlg mapper(*doc,3,this);
     check(mapper.Create(IDD_COMPOSITE_INPUT,this)!=FALSE,"keyboard mapper creates its controls");
     auto *keyboard=mapper.GetDlgItem(IDC_COMPOSITE_KEYBOARD); CRect keys; keyboard->GetClientRect(keys);
     const auto keyPoint=[&](int white){return MAKELPARAM((2*white+1)*keys.Width()/104,keys.Height()*4/5);};
     keyboard->SendMessage(WM_LBUTTONDOWN,MK_LBUTTON,keyPoint(23));
+    check(mapper.m_voices.size()==1 && mapper.m_voices.front().voice.track==4 && mapper.m_voices.front().voice.note==NOTE_MIDDLEC,
+        "mapping a key auditions only the selected child's fixed pitch");
+    const auto mappedVoice=mapper.m_voices.front().voice;
+    { CriticalSection cs; check(OwnsCompositePreview(*doc,mappedVoice),"mapping audition creates a real engine preview voice"); }
     keyboard->SendMessage(WM_MOUSEMOVE,MK_LBUTTON,keyPoint(27));
     keyboard->SendMessage(WM_LBUTTONUP,0,keyPoint(27));
+    check(mapper.m_voices.empty(),"mouse release stops the mapping audition");
     const auto mapped=[&](int midi){return (mapper.tracks[4].inputKeys[midi/8]&(1<<(midi%8)))!=0;};
     check(mapped(60)&&mapped(61)&&mapped(67)&&!mapped(59)&&!mapped(68),"keyboard drag maps Middle C through G including black keys");
     keyboard->SendMessage(WM_LBUTTONDOWN,MK_LBUTTON|MK_CONTROL,keyPoint(30)); keyboard->SendMessage(WM_LBUTTONUP,0,keyPoint(30));
     check(mapped(72)&&!mapped(70),"Ctrl-click adds a separate mapped key");
     keyboard->SendMessage(WM_LBUTTONDOWN,MK_LBUTTON|MK_CONTROL,keyPoint(30)); keyboard->SendMessage(WM_LBUTTONUP,0,keyPoint(30));
     check(!mapped(72)&&mapped(60),"Ctrl-click removes a mapped key without clearing the range");
+    mapper.m_fixed.SetCurSel(0); mapper.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_COMPOSITE_FIXED,CBN_SELCHANGE),reinterpret_cast<LPARAM>(mapper.GetDlgItem(IDC_COMPOSITE_FIXED)->m_hWnd));
+    mapper.m_root.SetCurSel(NOTE_MIDDLEC-12-NOTE_MIN); mapper.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_COMPOSITE_ROOT,CBN_SELCHANGE),reinterpret_cast<LPARAM>(mapper.GetDlgItem(IDC_COMPOSITE_ROOT)->m_hWnd));
+    check(mapper.tracks[4].inputTranspose==-12 && !mapper.tracks[4].inputFixedNote,"first-key pitch control sets semitone transposition");
+    mapper.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_COMPOSITE_MODE,BN_CLICKED));
+    const auto keysBeforePlay=mapper.tracks[4].inputKeys;
+    keyboard->SendMessage(WM_LBUTTONDOWN,MK_LBUTTON,keyPoint(23));
+    check(mapper.m_voices.size()==2 && mapper.m_voices[0].voice.note==NOTE_MIDDLEC-12 && mapper.m_voices[1].voice.note==NOTE_MIDDLEC,
+        "play mapping auditions overlapping lanes at their own sounding pitches");
+    keyboard->SendMessage(WM_MOUSEMOVE,MK_LBUTTON,keyPoint(27)); keyboard->SendMessage(WM_LBUTTONUP,0,keyPoint(27));
+    check(mapper.tracks[4].inputKeys==keysBeforePlay,"play mapping leaves key assignments unchanged while dragging");
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x90u | (60u<<8) | (90u<<16));
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x91u | (60u<<8) | (90u<<16));
+    check(mapper.m_voices.size()==4,"MIDI channels can independently hold the same composite note");
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x80u | (60u<<8));
+    check(mapper.m_voices.size()==2,"MIDI note-off releases only the owning input channel");
+    mapper.SendMessage(WM_MOD_MIDIMSG,0xB1u | (64u<<8) | (127u<<16));
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x81u | (60u<<8));
+    check(mapper.m_voices.size()==2 && !mapper.m_voices[0].held,"audition supports a held sustain pedal");
+    mapper.SendMessage(WM_MOD_MIDIMSG,0xB1u | (64u<<8));
+    check(mapper.m_voices.empty(),"sustain release stops deferred notes");
+    mapper.m_virtualKey='Q';
+    const int keyboardOffset=NOTE_MIDDLEC-doc->GetNoteWithBaseOctave(0,0);
+    mapper.SendMessage(WM_MOD_KEYCOMMAND,kcInstrumentStartNotes+keyboardOffset);
+    check(mapper.m_voices.size()==2,"computer note shortcuts audition the complete composite");
+    MSG keyup{}; keyup.message=WM_KEYUP; keyup.wParam='Q';
+    check(mapper.PreTranslateMessage(&keyup) && mapper.m_voices.empty(),"computer key release stops notes even after focus moves");
+    mapper.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_COMPOSITE_MODE,BN_CLICKED));
+    keyboard->SendMessage(WM_LBUTTONDOWN,MK_LBUTTON,keyPoint(23));
+    keyboard->SendMessage(WM_CAPTURECHANGED,0,0);
+    check(mapper.m_voices.empty(),"losing mouse capture releases mapping notes");
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x90u | (60u<<8) | (90u<<16));
+    check(!doc->IsModified() && std::equal(patternBeforeAudition.begin(),patternBeforeAudition.end(),file.Patterns[0].begin()),
+        "mouse, computer and MIDI audition leave song notes and modified flag unchanged");
     // Check dialog geometry, then render its keyboard directly into a bitmap. No desktop capture.
     CRect bounds; mapper.GetClientRect(bounds);
     bool contained=true;
@@ -500,8 +541,58 @@ void CViewPattern::RunComposerChecks(const mpt::PathString &directory)
     std::ofstream preview((directory+P_("composer-keyboard.bmp")).AsNative(),std::ios::binary);
     preview.write(reinterpret_cast<const char *>(&header),sizeof(header)); preview.write(reinterpret_cast<const char *>(&info.bmiHeader),sizeof(BITMAPINFOHEADER));
     preview.write(static_cast<const char *>(pixels),bounds.Width()*bounds.Height()*4); preview.close(); ::SelectObject(image,previous); ::DeleteObject(bitmap);
+    {
+        CriticalSection cs; auto settings=file.ChnSettings;
+        file.ChnSettings[4]=mapper.tracks[4];
+        const auto pitchPreset=directory+P_("composer-pitch.synpreset"); SetCurrentColumn(3); ComposerPreset(true,pitchPreset);
+        file.ChnSettings=std::move(settings);
+        auto loaded=std::make_unique<CSoundFile>(); mpt::IO::InputFile input(pitchPreset); auto reader=GetFileReader(input);
+        check(loaded->Create(reader) && loaded->ChnSettings[1].inputTranspose==-12 && loaded->ChnSettings[1].inputFixedNote==0,
+            "transposed keyboard mapping survives preset save and reload");
+    }
+    // Paint the complete dialog into owned memory so its new controls can be inspected without capturing the desktop.
+    mapper.GetWindowRect(bounds); bounds.MoveToXY(0,0); info.bmiHeader.biWidth=bounds.Width(); info.bmiHeader.biHeight=-bounds.Height();
+    bitmap=::CreateDIBSection(image,&info,DIB_RGB_COLORS,&pixels,nullptr,0); previous=::SelectObject(image,bitmap);
+    image.FillSolidRect(bounds,SynMPTTheme::Color(COLOR_BTNFACE));
+    mapper.SendMessage(WM_PRINT,reinterpret_cast<WPARAM>(image.m_hDC),PRF_NONCLIENT|PRF_CLIENT|PRF_CHILDREN|PRF_ERASEBKGND);
+    header.bfSize=header.bfOffBits+bounds.Width()*bounds.Height()*4;
+    std::ofstream dialogPreview((directory+P_("composer-audition.bmp")).AsNative(),std::ios::binary);
+    dialogPreview.write(reinterpret_cast<const char *>(&header),sizeof(header)); dialogPreview.write(reinterpret_cast<const char *>(&info.bmiHeader),sizeof(BITMAPINFOHEADER));
+    dialogPreview.write(static_cast<const char *>(pixels),bounds.Width()*bounds.Height()*4); dialogPreview.close(); ::SelectObject(image,previous); ::DeleteObject(bitmap);
+    mapper.SendMessage(WM_ACTIVATE,WA_INACTIVE,0);
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x90u | (60u<<8) | (90u<<16));
+    check(mapper.m_voices.empty() && CMainFrame::GetMainFrame()->GetMidiRecordWnd()==mapper.m_hWnd,
+        "inactive mapper stops audition and keeps MIDI away from the recording view");
+    mapper.SendMessage(WM_ACTIVATE,WA_ACTIVE,0);
+    mapper.SendMessage(WM_MOD_MIDIMSG,0x90u | (60u<<8) | (90u<<16));
+    check(mapper.m_voices.size()==2,"reactivating the mapper permits audition again");
     mapper.DestroyWindow();
+    check(mapper.m_voices.empty() && CMainFrame::GetMainFrame()->GetMidiRecordWnd()==previousMidi,
+        "closing mapper stops held notes and restores the previous MIDI destination");
+    check(file.ChnSettings[4].inputFixedNote==NOTE_MIDDLEC && file.ChnSettings[4].inputTranspose==0,
+        "cancelled pitch changes leave the document mapping unchanged");
     check(file.ChnSettings[4].inputKeys[72/8]==0,"cancelled mapping edits leave the document unchanged");
+    SetCurrentColumn(3); SetCurrentRow(0,WrapMode::LimitAtPatternEnd); m_armedComposite=CHANNELINDEX_INVALID;
+    SendCtrlMessage(CTRLMSG_SETRECORD,0);
+    auto *controlView=dynamic_cast<CModControlView *>(CWnd::FromHandlePermanent(m_hWndCtrl));
+    auto *controlPage=controlView ? controlView->GetCurrentControlDlg() : nullptr;
+    check(!IsEditingEnabled() && controlPage && controlPage->IsDlgButtonChecked(IDC_COMPOSER_PLAY_ONLY)==BST_CHECKED,
+        "Play only button reflects the shared recording state");
+    const auto beforePlayCursor=m_Cursor;
+    TempEnterNote(NOTE_MIDDLEC,-1,false);
+    check(m_compositeVoices[NOTE_MIDDLEC].size()==2,"unarmed selected composite plays in Play only mode");
+    TempStopNote(NOTE_MIDDLEC,true);
+    check(m_compositeVoices[NOTE_MIDDLEC].empty() && m_Cursor==beforePlayCursor && !doc->IsModified()
+        && std::equal(patternBeforeAudition.begin(),patternBeforeAudition.end(),file.Patterns[0].begin()),
+        "Play only note-on/off leaves patterns, cursor and modified state untouched");
+    TempEnterNote(NOTE_MIDDLEC,-1,false); SendCtrlMessage(CTRLMSG_SETRECORD,1); TempStopNote(NOTE_MIDDLEC,true);
+    check(std::equal(patternBeforeAudition.begin(),patternBeforeAudition.end(),file.Patterns[0].begin()),
+        "enabling recording before releasing an auditioned note does not write a stray note-off");
+    m_armedComposite=3; SetCurrentRow(20,WrapMode::LimitAtPatternEnd); TempEnterNote(NOTE_MIDDLEC,-1,false);
+    check(file.Patterns[0].GetpModCommand(20,4)->note==NOTE_MIDDLEC && file.Patterns[0].GetpModCommand(20,5)->note==NOTE_MIDDLEC,
+        "armed composite still writes both child notes in record mode");
+    StopCompositeVoices(); *file.Patterns[0].GetpModCommand(20,4)={}; *file.Patterns[0].GetpModCommand(20,5)={};
+    doc->SetModified(wasModified);
     m_Status.set(psRecordingEnabled); m_stepLength=4; m_stepAdvance=true; m_armedComposite=CHANNELINDEX_INVALID;
     SetCurrentColumn(4); SetCurrentRow(0,WrapMode::LimitAtPatternEnd); ComposerStepNote(NOTE_MIDDLEC,-1); ComposerStepNote(NOTE_MIDDLEC+2,-1);
     check(file.Patterns[m_nPattern].GetpModCommand(0,4)->note==NOTE_MIDDLEC && file.Patterns[m_nPattern].GetpModCommand(4,4)->note==NOTE_MIDDLEC+2 && file.Patterns[m_nPattern].GetpModCommand(8,4)->note==NOTE_KEYOFF,"consecutive steps replace their preceding note end");

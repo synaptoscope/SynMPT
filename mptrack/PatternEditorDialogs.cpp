@@ -15,6 +15,7 @@
 #include "FileDialog.h"
 #include "HighDPISupport.h"
 #include "InputHandler.h"
+#include "../soundlib/MIDIEvents.h"
 #include "Mainfrm.h"
 #include "Moddoc.h"
 #include "Mptrack.h"
@@ -2149,6 +2150,16 @@ CString MetronomeSettingsDlg::GetToolTipText(UINT id, HWND) const
 
 BEGIN_MESSAGE_MAP(CCompositeInputDlg, DialogBase)
     ON_WM_DRAWITEM()
+    ON_WM_DESTROY()
+    ON_WM_ACTIVATE()
+    ON_MESSAGE(WM_MOD_KEYCOMMAND, &CCompositeInputDlg::OnKeyCommand)
+    ON_MESSAGE(WM_MOD_MIDIMSG, &CCompositeInputDlg::OnMidiMsg)
+    ON_BN_CLICKED(IDC_COMPOSITE_MODE, &CCompositeInputDlg::OnModeChanged)
+    ON_BN_CLICKED(IDC_COMPOSITE_ROUTE, &CCompositeInputDlg::OnPitchChanged)
+    ON_CBN_SELCHANGE(IDC_COMPOSITE_FIXED, &CCompositeInputDlg::OnPitchChanged)
+    ON_CBN_SELCHANGE(IDC_COMPOSITE_INSTRUMENT, &CCompositeInputDlg::OnPitchChanged)
+    ON_EN_CHANGE(IDC_COMPOSITE_TRANSPOSE, &CCompositeInputDlg::OnPitchChanged)
+    ON_CBN_SELCHANGE(IDC_COMPOSITE_ROOT, &CCompositeInputDlg::OnRootChanged)
     ON_LBN_SELCHANGE(IDC_COMPOSITE_TRACKS, &CCompositeInputDlg::OnLaneChanged)
     ON_BN_CLICKED(IDC_COMPOSITE_SPREAD, &CCompositeInputDlg::OnSpread)
     ON_BN_CLICKED(IDC_COMPOSITE_CLEAR, &CCompositeInputDlg::OnClearKeys)
@@ -2189,7 +2200,9 @@ BOOL CCompositeInputDlg::OnInitDialog()
     m_list.SubclassDlgItem(IDC_COMPOSITE_TRACKS, this);
     m_instrument.SubclassDlgItem(IDC_COMPOSITE_INSTRUMENT, this);
     m_low.SubclassDlgItem(IDC_COMPOSITE_LOW, this); m_high.SubclassDlgItem(IDC_COMPOSITE_HIGH, this);
+    m_loading = true;
     m_fixed.SubclassDlgItem(IDC_COMPOSITE_FIXED, this); m_fixed.AddString(_T("Follow key + transpose"));
+    m_root.SubclassDlgItem(IDC_COMPOSITE_ROOT, this);
     m_keyboard.Init(this, IDC_COMPOSITE_KEYBOARD);
     m_list.SetItemHeight(0, 22);
     CheckDlgButton(IDC_COMPOSITE_ENABLED, enabled ? BST_CHECKED : BST_UNCHECKED);
@@ -2205,7 +2218,7 @@ BOOL CCompositeInputDlg::OnInitDialog()
     for(int note = NOTE_MIN; note <= NOTE_MAX; note++)
     {
         auto name = mpt::ToCString(file.GetNoteName(static_cast<ModCommand::NOTE>(note)));
-        m_low.AddString(name); m_high.AddString(name); m_fixed.AddString(name);
+        m_low.AddString(name); m_high.AddString(name); m_fixed.AddString(name); m_root.AddString(name);
     }
     static constexpr COLORREF palette[] = { RGB(80,185,230), RGB(240,160,80), RGB(185,120,225), RGB(90,205,155), RGB(230,105,150), RGB(220,210,90) };
     for(size_t lane = 0; lane < m_members.size(); lane++)
@@ -2216,10 +2229,14 @@ BOOL CCompositeInputDlg::OnInitDialog()
     }
     if(!m_members.empty()) { m_selected = 0; m_list.SetCurSel(0); LoadLane(); }
     else { GetDlgItem(IDC_COMPOSITE_ROUTE)->EnableWindow(FALSE); GetDlgItem(IDC_COMPOSITE_SPREAD)->EnableWindow(FALSE); }
+    m_loading = false;
+    auto *main = CMainFrame::GetMainFrame(); m_previousMidi = main->GetMidiRecordWnd(); m_previousSysEx = main->GetMidiSysexCallback();
+    main->SetMidiRecordWnd(m_hWnd);
+    SetDlgItemText(IDC_COMPOSITE_READOUT, _T("Select a lane and play. Mapping changes are kept only when you press OK."));
     return TRUE;
 }
 
-bool CCompositeInputDlg::StoreLane()
+bool CCompositeInputDlg::StoreLane(bool notify)
 {
     if(m_selected < 0) return true;
     BOOL valid = FALSE;
@@ -2229,7 +2246,7 @@ bool CCompositeInputDlg::StoreLane()
     const auto instrument = m_instrument.GetCurSel() >= 0 ? static_cast<uint16>(m_instrument.GetItemData(m_instrument.GetCurSel())) : uint16(0);
     if(!valid || transpose < -119 || transpose > 119 || low < NOTE_MIN || high > NOTE_MAX || low > high || (receives && !instrument))
     {
-        Reporting::Information(_T("Choose an instrument and a valid key range. Transpose must be between -119 and +119 semitones.")); return false;
+        if(notify) Reporting::Information(_T("Choose an instrument and a valid key range. Transpose must be between -119 and +119 semitones.")); return false;
     }
     auto &track = tracks[m_members[m_selected]];
     track.trackInstrument = instrument; track.inputEnabled = receives;
@@ -2248,6 +2265,7 @@ void CCompositeInputDlg::LoadLane()
     for(int index = 0; index < m_instrument.GetCount(); index++) if(m_instrument.GetItemData(index) == track.trackInstrument) m_instrument.SetCurSel(index);
     m_low.SetCurSel(track.inputNoteMin - NOTE_MIN); m_high.SetCurSel(track.inputNoteMax - NOTE_MIN);
     SetDlgItemInt(IDC_COMPOSITE_TRANSPOSE, track.inputTranspose, TRUE);
+    UpdatePitchControls();
     m_loading = false; m_keyboard.Invalidate(FALSE); m_list.Invalidate(FALSE);
 }
 
@@ -2255,7 +2273,7 @@ void CCompositeInputDlg::OnLaneChanged()
 {
     const auto next = m_list.GetCurSel();
     if(!StoreLane()) { m_list.SetCurSel(m_selected); return; }
-    m_selected = next; if(m_selected >= 0) LoadLane();
+    StopAudition(); m_selected = next; if(m_selected >= 0) LoadLane();
 }
 
 void CCompositeInputDlg::OnSpread()
@@ -2283,7 +2301,7 @@ void CCompositeInputDlg::OnOK()
     enabled = IsDlgButtonChecked(IDC_COMPOSITE_ENABLED) == BST_CHECKED;
     if(enabled && std::none_of(m_members.begin(), m_members.end(), [&](auto member) { return tracks[member].inputEnabled; }))
     { Reporting::Information(_T("Enable input on at least one instrument lane.")); return; }
-    DialogBase::OnOK();
+    StopAudition(); RestoreMidiTarget(); DialogBase::OnOK();
 }
 
 
@@ -2299,12 +2317,12 @@ void CComposerTextDlg::OnOK() { GetDlgItemText(IDC_COMPOSER_TEXT, value); Dialog
 void CCompositeInputDlg::OnRangeChanged()
 {
     if(m_loading || m_selected < 0) return;
-    if(StoreLane()) { tracks[m_members[m_selected]].inputUseKeys = false; m_keyboard.Invalidate(FALSE); }
+    if(StoreLane()) { StopAudition(); tracks[m_members[m_selected]].inputUseKeys = false; UpdatePitchControls(); m_keyboard.Invalidate(FALSE); }
 }
 void CCompositeInputDlg::OnClearKeys()
 {
     if(m_selected < 0) return;
-    auto &track = tracks[m_members[m_selected]]; track.inputUseKeys = true; track.inputKeys.fill(0); m_keyboard.Invalidate(FALSE);
+    StopAudition(); auto &track = tracks[m_members[m_selected]]; track.inputUseKeys = true; track.inputKeys.fill(0); UpdatePitchControls(); m_keyboard.Invalidate(FALSE);
 }
 void CCompositeInputDlg::OnMapColor()
 {
@@ -2331,6 +2349,7 @@ BEGIN_MESSAGE_MAP(CCompositeKeyboard, CWnd)
     ON_WM_LBUTTONUP()
     ON_WM_MOUSEMOVE()
     ON_WM_CAPTURECHANGED()
+    ON_WM_GETDLGCODE()
 END_MESSAGE_MAP()
 static bool ComposerBlackKey(int midi) { const int n = midi % 12; return n == 1 || n == 3 || n == 6 || n == 8 || n == 10; }
 void CCompositeKeyboard::Init(CCompositeInputDlg *owner, UINT id) { m_owner = owner; SubclassDlgItem(id, owner); }
@@ -2379,6 +2398,10 @@ void CCompositeKeyboard::DrawKeyboard(CDC &target)
             dc.FillSolidRect(rect.left + 2, stripe - 3, std::max(1, rect.Width() - 4), 3, m_owner->tracks[member].inputColor);
             stripe -= 4; if(stripe < rect.top + 8) break;
         }
+        if(std::any_of(m_owner->m_voices.begin(), m_owner->m_voices.end(), [=](const auto &voice) { return voice.input == midi + NOTE_MIN; }))
+        {
+            CRect light(rect); light.DeflateRect(2, 2); dc.Draw3dRect(light, RGB(255,255,255), RGB(255,255,255));
+        }
         if(midi == 60)
         {
             dc.SetTextColor(RGB(0,0,0)); CRect label(rect); label.top = rect.bottom * 2 / 3 - 10;
@@ -2391,26 +2414,204 @@ void CCompositeKeyboard::OnLButtonDown(UINT flags, CPoint point)
 {
     if(m_owner->m_selected < 0 || !m_owner->StoreLane()) return;
     m_anchor = HitKey(point); if(m_anchor < 0) return;
-    auto &track = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
-    if(!track.inputUseKeys)
+    SetFocus();
+    if(m_owner->m_mapMode)
     {
-        track.inputKeys.fill(0);
-        for(int key = track.inputNoteMin - NOTE_MIN; key <= track.inputNoteMax - NOTE_MIN; key++) track.inputKeys[key / 8] |= uint8(1u << (key % 8));
+        auto &track = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
+        if(!track.inputUseKeys)
+        {
+            track.inputKeys.fill(0);
+            for(int key = std::max(0, track.inputNoteMin - NOTE_MIN); key <= std::min(119, track.inputNoteMax - NOTE_MIN); key++)
+                track.inputKeys[key / 8] |= uint8(1u << (key % 8));
+        }
+        m_before = track.inputKeys; m_add = (flags & MK_CONTROL) != 0;
+        m_remove = m_add && (m_before[m_anchor / 8] & (1u << (m_anchor % 8))) != 0;
     }
-    m_before = track.inputKeys; m_add = (flags & MK_CONTROL) != 0;
-    m_remove = m_add && (m_before[m_anchor / 8] & (1u << (m_anchor % 8))) != 0;
     SetCapture(); Apply(point);
 }
 void CCompositeKeyboard::Apply(CPoint point)
 {
-    int end = HitKey(point); if(m_anchor < 0 || end < 0) return;
-    auto &track = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
-    track.inputUseKeys = true; track.inputKeys = m_add ? m_before : std::array<uint8,15>{};
-    for(int key = std::min(m_anchor,end); key <= std::max(m_anchor,end); key++)
-        if(m_remove) track.inputKeys[key / 8] &= uint8(~(1u << (key % 8))); else track.inputKeys[key / 8] |= uint8(1u << (key % 8));
-    track.inputEnabled = true; m_owner->CheckDlgButton(IDC_COMPOSITE_ROUTE, BST_CHECKED); Invalidate(FALSE);
+    const int end = HitKey(point); if(m_anchor < 0) return;
+    if(end < 0) { ReleaseMouseNote(); return; }
+    if(m_owner->m_mapMode)
+    {
+        auto &track = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
+        track.inputUseKeys = true; track.inputKeys = m_add ? m_before : std::array<uint8,15>{};
+        for(int key = std::min(m_anchor,end); key <= std::max(m_anchor,end); key++)
+            if(m_remove) track.inputKeys[key / 8] &= uint8(~(1u << (key % 8))); else track.inputKeys[key / 8] |= uint8(1u << (key % 8));
+        int first = -1, last = -1;
+        for(int key = 0; key < 120; key++) if(track.inputKeys[key / 8] & (1u << (key % 8)))
+        { if(first < 0) first = key; last = key; }
+        if(first >= 0)
+        {
+            track.inputNoteMin = static_cast<uint8>(first + NOTE_MIN); track.inputNoteMax = static_cast<uint8>(last + NOTE_MIN);
+            m_owner->m_low.SetCurSel(first); m_owner->m_high.SetCurSel(last);
+        }
+        track.inputEnabled = true; m_owner->CheckDlgButton(IDC_COMPOSITE_ROUTE, BST_CHECKED);
+        m_owner->UpdatePitchControls();
+    }
+    if(end != m_sounding)
+    {
+        ReleaseMouseNote(); m_sounding = end;
+        m_owner->Audition(0, static_cast<ModCommand::NOTE>(end + NOTE_MIN), -1, m_owner->m_mapMode);
+    }
+    Invalidate(FALSE);
+}
+void CCompositeKeyboard::ReleaseMouseNote()
+{
+    if(m_sounding >= 0) m_owner->ReleaseNote(0, static_cast<ModCommand::NOTE>(m_sounding + NOTE_MIN), true);
+    m_sounding = -1;
 }
 void CCompositeKeyboard::OnMouseMove(UINT flags, CPoint point) { if(GetCapture() == this && (flags & MK_LBUTTON)) Apply(point); }
-void CCompositeKeyboard::OnLButtonUp(UINT, CPoint point) { if(GetCapture() == this) { Apply(point); m_anchor = -1; ReleaseCapture(); } }
+void CCompositeKeyboard::OnLButtonUp(UINT, CPoint point)
+{
+    if(GetCapture() == this) { Apply(point); m_anchor = -1; ReleaseMouseNote(); ReleaseCapture(); }
+}
+void CCompositeKeyboard::OnCaptureChanged(CWnd *) { m_anchor = -1; ReleaseMouseNote(); }
+
+int CCompositeInputDlg::FirstMappedKey() const
+{
+    if(m_selected < 0) return NOTE_MIN;
+    const auto &track = tracks[m_members[m_selected]];
+    if(track.inputUseKeys)
+        for(int key = 0; key < 120; key++) if(track.inputKeys[key / 8] & (1u << (key % 8))) return key + NOTE_MIN;
+    return track.inputNoteMin;
+}
+void CCompositeInputDlg::UpdatePitchControls()
+{
+    if(m_selected < 0) return;
+    const auto &track = tracks[m_members[m_selected]];
+    const int output = track.inputFixedNote ? track.inputFixedNote : FirstMappedKey() + track.inputTranspose;
+    m_root.SetCurSel(ModCommand::IsNote(static_cast<ModCommand::NOTE>(output)) ? output - NOTE_MIN : -1);
+    m_root.EnableWindow(!track.inputFixedNote); GetDlgItem(IDC_COMPOSITE_TRANSPOSE)->EnableWindow(!track.inputFixedNote);
+}
+void CCompositeInputDlg::OnPitchChanged()
+{
+    if(m_loading) return;
+    if(StoreLane(false)) { StopAudition(); UpdatePitchControls(); m_keyboard.Invalidate(FALSE); }
+}
+void CCompositeInputDlg::OnRootChanged()
+{
+    if(m_loading || m_selected < 0 || m_root.GetCurSel() < 0) return;
+    const int transpose = m_root.GetCurSel() + NOTE_MIN - FirstMappedKey();
+    if(transpose < -119 || transpose > 119) { UpdatePitchControls(); return; }
+    SetDlgItemInt(IDC_COMPOSITE_TRANSPOSE, transpose, TRUE);
+}
+void CCompositeInputDlg::OnModeChanged()
+{
+    if(!StoreLane()) return;
+    StopAudition(); m_mapMode = !m_mapMode;
+    SetDlgItemText(IDC_COMPOSITE_MODE, m_mapMode ? _T("Map + audition") : _T("Play mapping"));
+    m_keyboard.SetFocus();
+}
+void CCompositeInputDlg::Audition(unsigned source, ModCommand::NOTE note, int volume, bool selectedOnly)
+{
+    if(source >= 18 || !ModCommand::IsNote(note) || !StoreLane(false)) return;
+    if(std::any_of(m_voices.begin(), m_voices.end(), [=](const auto &voice) { return voice.source == source && voice.input == note && voice.held; })) return;
+    ReleaseNote(source, note, true);
+    // Audition the working copy even before enabling or accepting the new composite.
+    const bool previous = tracks[m_bus].compositeInput; tracks[m_bus].compositeInput = true;
+    auto routes = ResolveCompositeInput(tracks, m_bus, note); tracks[m_bus].compositeInput = previous;
+    if(selectedOnly && m_selected >= 0)
+        routes.erase(std::remove_if(routes.begin(), routes.end(), [&](const auto &route) { return route.channel != m_members[m_selected]; }), routes.end());
+    CString status = MPT_CFORMAT("Input {} (MIDI {})")(mpt::ToCString(m_doc.GetSoundFile().GetNoteName(note)), note - NOTE_MIN);
+    for(const auto &route : routes)
+    {
+        m_voices.push_back({source, note, PlayCompositePreview(m_doc, route, volume)});
+        status += MPT_CFORMAT("  |  Lane {}: {}")(route.channel + 1, mpt::ToCString(m_doc.GetSoundFile().GetNoteName(route.note)));
+    }
+    if(routes.empty()) status += _T("  |  No enabled lane mapped to this key");
+    SetDlgItemText(IDC_COMPOSITE_READOUT, status); m_keyboard.Invalidate(FALSE);
+}
+void CCompositeInputDlg::ReleaseNote(unsigned source, ModCommand::NOTE note, bool force)
+{
+    CriticalSection cs;
+    for(auto it = m_voices.begin(); it != m_voices.end();)
+    {
+        if(it->source != source || it->input != note) { ++it; continue; }
+        if(!force && source >= 2 && m_sustain[source - 2]) { it->held = false; ++it; continue; }
+        if(OwnsCompositePreview(m_doc, it->voice))
+            m_doc.NoteOff(it->voice.note, true, it->voice.instrument, it->voice.preview);
+        it = m_voices.erase(it);
+    }
+    if(m_keyboard.m_hWnd) m_keyboard.Invalidate(FALSE);
+}
+void CCompositeInputDlg::StopAudition()
+{
+    while(!m_voices.empty()) ReleaseNote(m_voices.back().source, m_voices.back().input, true);
+    m_sustain.fill(false); m_keyNotes.fill(NOTE_NONE);
+}
+BOOL CCompositeInputDlg::PreTranslateMessage(MSG *msg)
+{
+    const bool down = msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN;
+    const bool up = msg->message == WM_KEYUP || msg->message == WM_SYSKEYUP;
+    const auto key = static_cast<UINT>(msg->wParam);
+    if(up && key < m_keyNotes.size() && m_keyNotes[key] != NOTE_NONE)
+    {
+        ReleaseNote(1, m_keyNotes[key], true); m_keyNotes[key] = NOTE_NONE; return TRUE;
+    }
+    if((up || down) && GetFocus() == &m_keyboard)
+    {
+        if(key == VK_SPACE && down) { StopAudition(); return TRUE; }
+        if(down && !(msg->lParam & (1u << 30)))
+        {
+            m_virtualKey = key; auto *input = CMainFrame::GetInputHandler();
+            if(input->KeyEvent(kCtxViewInstruments, input->Translate(*msg), this) != kcNull) return TRUE;
+        }
+        if(key < m_keyNotes.size() && m_keyNotes[key] != NOTE_NONE) return TRUE;
+    }
+    return DialogBase::PreTranslateMessage(msg);
+}
+LRESULT CCompositeInputDlg::OnKeyCommand(WPARAM command, LPARAM)
+{
+    if(command >= kcInstrumentStartNotes && command <= kcInstrumentEndNotes)
+    {
+        const auto note = m_doc.GetNoteWithBaseOctave(static_cast<int>(command - kcInstrumentStartNotes), 0);
+        if(ModCommand::IsNote(note)) { if(m_virtualKey < m_keyNotes.size()) m_keyNotes[m_virtualKey] = note; Audition(1, note); }
+        return command;
+    }
+    return kcNull;
+}
+LRESULT CCompositeInputDlg::OnMidiMsg(WPARAM data, LPARAM)
+{
+    if(!m_acceptMidi) return 1;
+    const auto midi = static_cast<uint32>(data); const auto type = MIDIEvents::GetTypeFromEvent(midi);
+    const auto channel = MIDIEvents::GetChannelFromEvent(midi); const unsigned source = channel + 2;
+    const auto a = MIDIEvents::GetDataByte1FromEvent(midi), b = MIDIEvents::GetDataByte2FromEvent(midi);
+    const auto note = static_cast<ModCommand::NOTE>(a + NOTE_MIN);
+    if(type == MIDIEvents::evNoteOn && b) Audition(source, note, (b * 256 + 63) / 127);
+    else if(type == MIDIEvents::evNoteOff || (type == MIDIEvents::evNoteOn && !b)) ReleaseNote(source, note);
+    else if(type == MIDIEvents::evControllerChange && a == 64)
+    {
+        m_sustain[channel] = b >= 64;
+        if(!m_sustain[channel])
+        {
+            auto pending = m_voices;
+            for(const auto &voice : pending) if(voice.source == source && !voice.held) ReleaseNote(source, voice.input, true);
+        }
+    } else if(type == MIDIEvents::evControllerChange && (a == 120 || a == 123))
+    {
+        auto pending = m_voices;
+        for(const auto &voice : pending) if(voice.source == source) ReleaseNote(source, voice.input, true);
+        m_sustain[channel] = false;
+    }
+    return 1;
+}
+void CCompositeInputDlg::RestoreMidiTarget()
+{
+    auto *main = CMainFrame::GetMainFrame();
+    if(main && main->GetMidiRecordWnd() == m_hWnd)
+        main->SetMidiRecordWnd(::IsWindow(m_previousMidi) ? m_previousMidi : nullptr, m_previousSysEx);
+}
+void CCompositeInputDlg::OnCancel() { StopAudition(); RestoreMidiTarget(); DialogBase::OnCancel(); }
+void CCompositeInputDlg::OnDestroy() { StopAudition(); RestoreMidiTarget(); DialogBase::OnDestroy(); }
+void CCompositeInputDlg::OnActivate(UINT state, CWnd *other, BOOL minimized)
+{
+    DialogBase::OnActivate(state, other, minimized);
+    if(!m_keyboard.m_hWnd) return;
+    m_acceptMidi = state != WA_INACTIVE;
+    if(state == WA_INACTIVE) StopAudition(); // Keep MIDI isolated from the recording view until this dialog closes.
+    else CMainFrame::GetMainFrame()->SetMidiRecordWnd(m_hWnd);
+}
 
 OPENMPT_NAMESPACE_END
