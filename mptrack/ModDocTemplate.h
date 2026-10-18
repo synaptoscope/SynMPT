@@ -25,6 +25,7 @@ class CModDoc;
 class CModDocTemplate: public CMultiDocTemplate
 {
 	std::unordered_set<CModDoc *> m_documents;	// Allow faster lookup of open documents than MFC's linear search allows for
+	bool m_openCancelled = false;
 
 public:
 	CModDocTemplate(UINT nIDResource, CRuntimeClass* pDocClass, CRuntimeClass* pFrameClass, CRuntimeClass* pViewClass):
@@ -33,6 +34,9 @@ public:
 	CDocument* OpenTemplateFile(const mpt::PathString &filename, bool isExampleTune = false);
 
 	CDocument* OpenDocumentFile(LPCTSTR lpszPathName, BOOL addToMru = TRUE, BOOL makeVisible = TRUE) override;
+
+	void ResetOpenCancelled() { m_openCancelled = false; }
+	bool WasOpenCancelled() const { return m_openCancelled; }
 
 	void AddDocument(CDocument *doc) override;
 	void RemoveDocument(CDocument *doc) override;

@@ -318,15 +318,6 @@ BOOL CModDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		}
 	}
 
-    if(!m_SndFile.m_synmptVersion && !theApp.m_synmptQuietOpen)
-    {
-        const auto choice = Reporting::Confirm(_T("Convert this song to a SynMPT project?\n\nYes: work on a new .synmpt copy.\nNo: keep its current format.\nCancel: close without opening.\n\nThe original file will not be changed."), _T("Open song"), true);
-        if(choice == cnfCancel) return FALSE;
-        if(choice == cnfYes)
-        {
-            if(!MakeNativeProject()) return FALSE;
-        }
-    }
 	return TRUE;
 }
 
@@ -390,6 +381,20 @@ bool CModDoc::OnSaveDocument(const mpt::PathString &filename, const bool setPath
 		ErrorBox(IDS_ERR_SAVESONG, CMainFrame::GetMainFrame());
 	}
 	return ok;
+}
+
+
+bool CModDoc::ConfirmNativeConversion()
+{
+    if(m_SndFile.m_synmptVersion) return true;
+    const auto choice = theApp.m_synmptQuietOpen
+        ? (theApp.m_synmptConversionReply == IDYES ? cnfYes : theApp.m_synmptConversionReply == IDNO ? cnfNo : cnfCancel)
+        : Reporting::Confirm(_T("Convert this song to a SynMPT project?\n\nYes: work on a new .synmpt copy.\nNo: keep its current format.\nCancel: close without opening.\n\nThe original file will not be changed."), _T("Open song"), true);
+    if(choice == cnfCancel) return false;
+    if(choice == cnfNo) return true;
+
+    ScopedLogCapturer logcapturer(*this, _T("Conversion Status"));
+    return MakeNativeProject();
 }
 
 

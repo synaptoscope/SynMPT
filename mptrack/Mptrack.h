@@ -215,6 +215,7 @@ public:
 	mpt::PathString GetInstallPkgPath() const { return m_InstallPkgPath; }          // i.e. "C:\Program Files\OpenMPT\" (installer mode) or "G:\OpenMPT\" (portable mode)
 
     bool m_synmptQuietOpen = false;
+    int m_synmptConversionReply = IDNO; // Used only by isolated, non-interactive editor checks.
 	static MODTYPE GetDefaultDocType() { return m_nDefaultDocType; }
 	static void SetDefaultDocType(MODTYPE n) { m_nDefaultDocType = n; }
 	static MidiLibrary &GetMidiLibrary() { return midiLibrary; }

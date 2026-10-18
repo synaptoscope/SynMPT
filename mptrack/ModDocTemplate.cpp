@@ -29,6 +29,7 @@ OPENMPT_NAMESPACE_BEGIN
 
 CDocument *CModDocTemplate::OpenDocumentFile(LPCTSTR lpszPathName, BOOL addToMru, BOOL makeVisible)
 {
+	ResetOpenCancelled();
 	const mpt::PathString filename = (lpszPathName ? mpt::PathString::FromCString(lpszPathName) : mpt::PathString());
 
 	// First, remove document from MRU list.
@@ -40,8 +41,21 @@ CDocument *CModDocTemplate::OpenDocumentFile(LPCTSTR lpszPathName, BOOL addToMru
 	CDocument *pDoc = CMultiDocTemplate::OpenDocumentFile(filename.empty() ? nullptr : filename.ToCString().GetString(), addToMru, makeVisible);
 	if(pDoc)
 	{
+		auto *modDoc = static_cast<CModDoc *>(pDoc);
 		CMainFrame *pMainFrm = CMainFrame::GetMainFrame();
-		if (pMainFrm) pMainFrm->OnDocumentCreated(static_cast<CModDoc *>(pDoc));
+		if(pMainFrm) pMainFrm->OnDocumentCreated(modDoc);
+
+		// OnOpenDocument runs BEFORE MFC initializes the frame's views. Conversion
+		// broadcasts ModType updates, so it must wait until InitialUpdateFrame has
+		// created/subclassed their controls and SetPathName has installed the source path.
+		// Invisible document loads deliberately have no interactive conversion step.
+		if(makeVisible && !filename.empty() && !modDoc->ConfirmNativeConversion())
+		{
+			m_openCancelled = true;
+			modDoc->SetModified(false);
+			modDoc->OnCloseDocument();
+			return nullptr;
+		}
 	} else if(!filename.empty() && CMainFrame::GetMainFrame() && addToMru)
 	{
 		// Opening the document failed
@@ -148,8 +162,11 @@ CDocument *CModDocManager::OpenDocumentFile(LPCTSTR lpszFileName, BOOL bAddToMRU
 		}
 	}
 
+	// Existing documents may bypass the template, so clear the previous result here too.
+	auto *modTemplate = theApp.GetModDocTemplate();
+	modTemplate->ResetOpenCancelled();
 	CDocument *pDoc = CDocManager::OpenDocumentFile(lpszFileName, bAddToMRU);
-	if(pDoc == nullptr && !filename.empty())
+	if(pDoc == nullptr && !filename.empty() && !modTemplate->WasOpenCancelled())
 	{
 		if(!mpt::native_fs{}.is_file(filename))
 		{

@@ -146,6 +146,7 @@ public:
 
     mpt::PathString m_conversionSource;
     bool MakeNativeProject();
+    bool ConfirmNativeConversion(); // Call only after the document views have received their initial update.
 	bool m_ShowSavedialog = false;
 	bool m_bHasValidPath = false; //becomes true if document is loaded or saved.
 
