@@ -2456,13 +2456,18 @@ void CSoundFile::SaveExtendedSongProperties(std::ostream &f) const
 		mpt::IO::WriteRaw(f, songArtistU8.c_str(), length);
 	}
 
+    if(GetType() == MOD_TYPE_MPT && m_synmptVersion)
+    {
+        WriteModularHeader(f, MagicLE("SNPR"), 2);
+        mpt::IO::WriteIntLE<uint16>(f, m_synmptVersion);
+    }
 	// SynMPT track routing and instrument overrides are MPTM extensions.
 	if(GetType() == MOD_TYPE_MPT && std::any_of(ChnSettings.begin(), ChnSettings.end(), [](const auto &track) {
-		return track.isBus || track.parentBus != CHANNELINDEX_INVALID || track.trackInstrument != 0 || track.inputEnabled;
+		return track.isBus || track.parentBus != CHANNELINDEX_INVALID || track.trackInstrument != 0 || track.inputEnabled || track.isPlaceholder || !track.trackAutoColor;
 	}))
 	{
-		WriteModularHeader(f, MagicLE("SNTK"), 1 + GetNumChannels() * 8);
-		mpt::IO::WriteIntLE<uint8>(f, 2);
+		WriteModularHeader(f, MagicLE("SNTK"), 1 + GetNumChannels() * 29);
+		mpt::IO::WriteIntLE<uint8>(f, 3);
 		for(const auto &track : ChnSettings)
 		{
 			mpt::IO::WriteIntLE<uint16>(f, track.trackInstrument);
@@ -2472,6 +2477,10 @@ void CSoundFile::SaveExtendedSongProperties(std::ostream &f) const
             mpt::IO::WriteIntLE<uint8>(f, track.inputNoteMin);
             mpt::IO::WriteIntLE<uint8>(f, track.inputNoteMax);
             mpt::IO::WriteIntLE<int8>(f, track.inputTranspose);
+            mpt::IO::WriteIntLE<uint8>(f, (track.inputUseKeys ? 1 : 0) | (track.trackAutoColor ? 2 : 0) | (track.isMaster ? 4 : 0) | (track.isPlaceholder ? 8 : 0));
+            mpt::IO::WriteIntLE<uint8>(f, track.inputFixedNote);
+            mpt::IO::WriteIntLE<uint32>(f, track.inputColor);
+            for(auto byte : track.inputKeys) mpt::IO::WriteIntLE<uint8>(f, byte);
 		}
 	}
 
@@ -2631,12 +2640,15 @@ bool CSoundFile::LoadExtendedSongProperties(FileReader &file, bool ignoreChannel
 				}
 				break;
 #endif
+            case MagicLE("SNPR"):
+                if(GetType() == MOD_TYPE_MPT && chunk.CanRead(2)) m_synmptVersion = chunk.ReadUint16LE();
+                break;
 			case MagicLE("SNTK"):
             {
                 const auto version = chunk.ReadUint8();
-				if(GetType() == MOD_TYPE_MPT && (version == 1 || version == 2))
+				if(GetType() == MOD_TYPE_MPT && (version >= 1 && version <= 3))
 				{
-					for(CHANNELINDEX channel = 0; channel < GetNumChannels() && chunk.CanRead(version == 1 ? 5 : 8); channel++)
+					for(CHANNELINDEX channel = 0; channel < GetNumChannels() && chunk.CanRead(version == 1 ? 5 : version == 2 ? 8 : 29); channel++)
 					{
 						auto &track = ChnSettings[channel];
 						track.trackInstrument = std::min<uint16>(chunk.ReadUint16LE(), MAX_INSTRUMENTS - 1);
@@ -2650,6 +2662,17 @@ bool CSoundFile::LoadExtendedSongProperties(FileReader &file, bool ignoreChannel
                             track.inputNoteMin = Clamp(chunk.ReadUint8(), uint8(NOTE_MIN), uint8(NOTE_MAX));
                             track.inputNoteMax = Clamp(chunk.ReadUint8(), track.inputNoteMin, uint8(NOTE_MAX));
                             track.inputTranspose = Clamp(chunk.ReadInt8(), int8(-119), int8(119));
+                            if(version >= 3)
+                            {
+                                const auto options = chunk.ReadUint8();
+                                track.inputUseKeys = (options & 1) != 0;
+                                track.trackAutoColor = (options & 2) != 0;
+                                track.isMaster = track.isBus && (options & 4) != 0;
+                                track.isPlaceholder = (options & 8) != 0;
+                                track.inputFixedNote = std::min<uint8>(chunk.ReadUint8(), NOTE_MAX);
+                                track.inputColor = chunk.ReadUint32LE();
+                                for(auto &byte : track.inputKeys) byte = chunk.ReadUint8();
+                            }
                         }
 						if(track.isBus) track.dwFlags.set(CHN_MUTE, (flags & 2) != 0);
 					}

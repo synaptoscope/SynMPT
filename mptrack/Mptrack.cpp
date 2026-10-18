@@ -1427,6 +1427,7 @@ BOOL CTrackApp::InitInstanceImpl(CMPTCommandLineInfo &cmdInfo)
 	m_pDebugSettings = std::make_unique<DebugSettings>(*m_pSettings);
 
 	m_pTrackerSettings = std::make_unique<TrackerSettings>(*m_pSettings);
+    m_synmptQuietOpen = cmdInfo.m_synmptChecks || cmdInfo.m_synmptEditorChecks;
 	if(cmdInfo.m_synmptChecks)
 	{
 		const int result = SynMPTChecks::Run(GetInstallBinArchPath(), cmdInfo.m_fileNames);
@@ -1889,11 +1890,11 @@ CModDoc *CTrackApp::NewDocument(MODTYPE newType)
 
 
 		// Default module type
-		newType = TrackerSettings::Instance().defaultModType;
+		newType = MOD_TYPE_MPT;
 
 		// Get active document to make the new module of the same type
 		CModDoc *pModDoc = CMainFrame::GetMainFrame()->GetActiveDoc();
-		if(pModDoc != nullptr && TrackerSettings::Instance().defaultNewFileAction == nfSameAsCurrent)
+		if(pModDoc != nullptr && TrackerSettings::Instance().defaultNewFileAction == nfSameAsCurrent && pModDoc->GetSoundFile().m_synmptVersion)
 		{
 			newType = pModDoc->GetSoundFile().GetBestSaveFormat();
 		}
@@ -3803,6 +3804,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 {
     const auto cls = Class(window);
     const bool captioned=(::GetWindowLongPtr(window,GWL_STYLE)&WS_CAPTION)==WS_CAPTION;
+    // Windows sends these undocumented theme-paint messages during native move/resize loops.
+    if(captioned && (message == 0x00AE || message == 0x00AF)) return 0;
+    if(captioned && message == WM_SETCURSOR && reinterpret_cast<HWND>(wParam) == window)
+    {
+        const int hit = static_cast<short>(LOWORD(lParam));
+        LPCTSTR cursor = nullptr;
+        if(hit == HTLEFT || hit == HTRIGHT) cursor = IDC_SIZEWE;
+        else if(hit == HTTOP || hit == HTBOTTOM) cursor = IDC_SIZENS;
+        else if(hit == HTTOPLEFT || hit == HTBOTTOMRIGHT) cursor = IDC_SIZENWSE;
+        else if(hit == HTTOPRIGHT || hit == HTBOTTOMLEFT) cursor = IDC_SIZENESW;
+        else if(hit == HTCAPTION || hit == HTSYSMENU || IsCaptionButton(hit)) cursor = IDC_ARROW;
+        if(cursor) { ::SetCursor(::LoadCursor(nullptr, cursor)); return TRUE; }
+    }
     if(captioned && message==WM_NCMOUSEMOVE)
     {
         const bool title=wParam==HTCAPTION || wParam==HTSYSMENU || wParam==HTMINBUTTON || wParam==HTMAXBUTTON || wParam==HTCLOSE;

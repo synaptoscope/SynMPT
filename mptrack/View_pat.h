@@ -237,6 +237,7 @@ public:
 	std::unique_ptr<CEffectVis> m_pEffectVis;
 
 	CViewPattern();
+    void RunComposerChecks(const mpt::PathString &directory);
 	~CViewPattern();
 	DECLARE_SERIAL(CViewPattern)
 
@@ -512,6 +513,23 @@ protected:
 	afx_msg void OnTrackInstrument() { ShowTrackInstrumentMenu(GetCurrentChannel()); }
 	afx_msg void OnTrackGroupOutput() { ShowTrackRoutingMenu(GetCurrentChannel()); }
     afx_msg void OnTrackCompositeInput();
+    afx_msg void OnComposerCommand(UINT command);
+    void ComposerRefresh();
+    void ComposerAdd(bool group, bool master = false);
+    void ComposerPreset(bool save, mpt::PathString path = {});
+    void ComposerColors(UINT command);
+    void ComposerExport();
+    void ComposerStepMenu();
+    bool ComposerStepNote(ModCommand::NOTE note, int volume);
+    void ComposerStepAction(UINT command);
+    void ComposerMoveTracks(CHANNELINDEX source, CHANNELINDEX target, CPoint point);
+    void ComposerOpenEditor(UINT page);
+    ROWINDEX m_stepLength = 0;
+    bool m_stepAdvance = true;
+    CPoint m_composerDragPoint;
+    bool m_composerDragging = false;
+    CHANNELINDEX m_composerTarget = CHANNELINDEX_INVALID;
+    bool m_composerGroupDrop = false, m_composerAfter = false;
     afx_msg void OnTrackFolderToggle();
     afx_msg void OnTrackArm() { ToggleTrackRecord(GetCurrentChannel()); }
 	afx_msg void OnTogglePendingMuteFromClick();

@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "ComposerColors.h"
 #include "PatternEditorDialogs.h"
 #include "FileDialog.h"
 #include "HighDPISupport.h"
@@ -1788,6 +1789,7 @@ void QuickChannelProperties::OnNameChanged()
 	{
 		PrepareUndo();
 		settings.szName = newName;
+        SynMPTApplyAutoColor(settings);
 		m_document->SetModified();
 		m_document->UpdateAllViews(nullptr, GeneralHint(m_channel).Channels(), this);
 	}
@@ -1801,6 +1803,7 @@ void QuickChannelProperties::OnChangeColor()
 	{
 		PrepareUndo();
 		m_document->GetSoundFile().ChnSettings[m_channel].color = *color;
+        m_document->GetSoundFile().ChnSettings[m_channel].trackAutoColor = false;
 		if(m_document->SupportsChannelColors())
 			m_document->SetModified();
 		m_document->UpdateAllViews(nullptr, GeneralHint(m_channel).Channels(), this);
@@ -2145,8 +2148,13 @@ CString MetronomeSettingsDlg::GetToolTipText(UINT id, HWND) const
 
 
 BEGIN_MESSAGE_MAP(CCompositeInputDlg, DialogBase)
+    ON_WM_DRAWITEM()
     ON_LBN_SELCHANGE(IDC_COMPOSITE_TRACKS, &CCompositeInputDlg::OnLaneChanged)
     ON_BN_CLICKED(IDC_COMPOSITE_SPREAD, &CCompositeInputDlg::OnSpread)
+    ON_BN_CLICKED(IDC_COMPOSITE_CLEAR, &CCompositeInputDlg::OnClearKeys)
+    ON_BN_CLICKED(IDC_COMPOSITE_COLOR, &CCompositeInputDlg::OnMapColor)
+    ON_CBN_SELCHANGE(IDC_COMPOSITE_LOW, &CCompositeInputDlg::OnRangeChanged)
+    ON_CBN_SELCHANGE(IDC_COMPOSITE_HIGH, &CCompositeInputDlg::OnRangeChanged)
 END_MESSAGE_MAP()
 
 CCompositeInputDlg::CCompositeInputDlg(CModDoc &doc, CHANNELINDEX bus, CWnd *parent)
@@ -2181,6 +2189,9 @@ BOOL CCompositeInputDlg::OnInitDialog()
     m_list.SubclassDlgItem(IDC_COMPOSITE_TRACKS, this);
     m_instrument.SubclassDlgItem(IDC_COMPOSITE_INSTRUMENT, this);
     m_low.SubclassDlgItem(IDC_COMPOSITE_LOW, this); m_high.SubclassDlgItem(IDC_COMPOSITE_HIGH, this);
+    m_fixed.SubclassDlgItem(IDC_COMPOSITE_FIXED, this); m_fixed.AddString(_T("Follow key + transpose"));
+    m_keyboard.Init(this, IDC_COMPOSITE_KEYBOARD);
+    m_list.SetItemHeight(0, 22);
     CheckDlgButton(IDC_COMPOSITE_ENABLED, enabled ? BST_CHECKED : BST_UNCHECKED);
     auto &file = m_doc.GetSoundFile();
     m_instrument.AddString(_T("Choose an instrument...")); m_instrument.SetItemData(0, 0);
@@ -2194,10 +2205,15 @@ BOOL CCompositeInputDlg::OnInitDialog()
     for(int note = NOTE_MIN; note <= NOTE_MAX; note++)
     {
         auto name = mpt::ToCString(file.GetNoteName(static_cast<ModCommand::NOTE>(note)));
-        m_low.AddString(name); m_high.AddString(name);
+        m_low.AddString(name); m_high.AddString(name); m_fixed.AddString(name);
     }
-    for(auto member : m_members)
+    static constexpr COLORREF palette[] = { RGB(80,185,230), RGB(240,160,80), RGB(185,120,225), RGB(90,205,155), RGB(230,105,150), RGB(220,210,90) };
+    for(size_t lane = 0; lane < m_members.size(); lane++)
+    {
+        const auto member = m_members[lane];
+        if(tracks[member].inputColor == 0xFFFFFFFF) tracks[member].inputColor = palette[lane % std::size(palette)];
         m_list.AddString(MPT_CFORMAT("{}: {}")(member + 1, mpt::ToCString(file.GetCharsetInternal(), tracks[member].szName.buf)));
+    }
     if(!m_members.empty()) { m_selected = 0; m_list.SetCurSel(0); LoadLane(); }
     else { GetDlgItem(IDC_COMPOSITE_ROUTE)->EnableWindow(FALSE); GetDlgItem(IDC_COMPOSITE_SPREAD)->EnableWindow(FALSE); }
     return TRUE;
@@ -2217,18 +2233,22 @@ bool CCompositeInputDlg::StoreLane()
     }
     auto &track = tracks[m_members[m_selected]];
     track.trackInstrument = instrument; track.inputEnabled = receives;
+    track.inputFixedNote = static_cast<uint8>(std::max(0, m_fixed.GetCurSel()));
     track.inputNoteMin = static_cast<uint8>(low); track.inputNoteMax = static_cast<uint8>(high); track.inputTranspose = static_cast<int8>(transpose);
     return true;
 }
 
 void CCompositeInputDlg::LoadLane()
 {
+    m_loading = true;
     const auto &track = tracks[m_members[m_selected]];
+    m_fixed.SetCurSel(track.inputFixedNote);
     CheckDlgButton(IDC_COMPOSITE_ROUTE, track.inputEnabled ? BST_CHECKED : BST_UNCHECKED);
     m_instrument.SetCurSel(0);
     for(int index = 0; index < m_instrument.GetCount(); index++) if(m_instrument.GetItemData(index) == track.trackInstrument) m_instrument.SetCurSel(index);
     m_low.SetCurSel(track.inputNoteMin - NOTE_MIN); m_high.SetCurSel(track.inputNoteMax - NOTE_MIN);
     SetDlgItemInt(IDC_COMPOSITE_TRANSPOSE, track.inputTranspose, TRUE);
+    m_loading = false; m_keyboard.Invalidate(FALSE); m_list.Invalidate(FALSE);
 }
 
 void CCompositeInputDlg::OnLaneChanged()
@@ -2250,7 +2270,7 @@ void CCompositeInputDlg::OnSpread()
     int low = NOTE_MIN;
     for(auto member : m_members) if(tracks[member].inputEnabled)
     {
-        auto &track = tracks[member]; track.inputNoteMin = static_cast<uint8>(low);
+        auto &track = tracks[member]; track.inputUseKeys = false; track.inputNoteMin = static_cast<uint8>(low);
         track.inputNoteMax = static_cast<uint8>(low + size.resultAsInt - 1);
         track.inputTranspose = static_cast<int8>(NOTE_MIDDLEC - low); low += size.resultAsInt;
     }
@@ -2265,5 +2285,132 @@ void CCompositeInputDlg::OnOK()
     { Reporting::Information(_T("Enable input on at least one instrument lane.")); return; }
     DialogBase::OnOK();
 }
+
+
+CComposerTextDlg::CComposerTextDlg(CWnd *parent, CString title, CString help, CString initial)
+    : DialogBase(IDD_COMPOSER_TEXT, parent), m_title(title), m_help(help), value(initial) {}
+BOOL CComposerTextDlg::OnInitDialog()
+{
+    DialogBase::OnInitDialog(); SetWindowText(m_title); SetDlgItemText(IDC_COMPOSER_HELP, m_help);
+    SetDlgItemText(IDC_COMPOSER_TEXT, value); return TRUE;
+}
+void CComposerTextDlg::OnOK() { GetDlgItemText(IDC_COMPOSER_TEXT, value); DialogBase::OnOK(); }
+
+void CCompositeInputDlg::OnRangeChanged()
+{
+    if(m_loading || m_selected < 0) return;
+    if(StoreLane()) { tracks[m_members[m_selected]].inputUseKeys = false; m_keyboard.Invalidate(FALSE); }
+}
+void CCompositeInputDlg::OnClearKeys()
+{
+    if(m_selected < 0) return;
+    auto &track = tracks[m_members[m_selected]]; track.inputUseKeys = true; track.inputKeys.fill(0); m_keyboard.Invalidate(FALSE);
+}
+void CCompositeInputDlg::OnMapColor()
+{
+    if(m_selected < 0) return;
+    auto &track = tracks[m_members[m_selected]]; CColorDialog dlg(track.inputColor, CC_FULLOPEN, this);
+    if(dlg.DoModal() == IDOK) { track.inputColor = dlg.GetColor(); m_keyboard.Invalidate(FALSE); m_list.Invalidate(FALSE); }
+}
+void CCompositeInputDlg::OnDrawItem(int id, LPDRAWITEMSTRUCT item)
+{
+    if(item->CtlID != IDC_COMPOSITE_TRACKS || item->itemID >= m_members.size()) { DialogBase::OnDrawItem(id, item); return; }
+    CDC dc; dc.Attach(item->hDC); CRect rect(item->rcItem);
+    dc.FillSolidRect(rect, item->itemState & ODS_SELECTED ? RGB(66,75,89) : RGB(43,46,51));
+    CRect swatch(rect.left + 4, rect.top + 4, rect.left + 16, rect.bottom - 4);
+    dc.FillSolidRect(swatch, tracks[m_members[item->itemID]].inputColor);
+    CString label; m_list.GetText(item->itemID, label); rect.left += 22;
+    dc.SetBkMode(TRANSPARENT); dc.SetTextColor(RGB(235,237,241)); dc.DrawText(label, rect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS); dc.Detach();
+}
+
+BEGIN_MESSAGE_MAP(CCompositeKeyboard, CWnd)
+    ON_WM_PRINTCLIENT()
+    ON_WM_PAINT()
+    ON_WM_ERASEBKGND()
+    ON_WM_LBUTTONDOWN()
+    ON_WM_LBUTTONUP()
+    ON_WM_MOUSEMOVE()
+    ON_WM_CAPTURECHANGED()
+END_MESSAGE_MAP()
+static bool ComposerBlackKey(int midi) { const int n = midi % 12; return n == 1 || n == 3 || n == 6 || n == 8 || n == 10; }
+void CCompositeKeyboard::Init(CCompositeInputDlg *owner, UINT id) { m_owner = owner; SubclassDlgItem(id, owner); }
+CRect CCompositeKeyboard::KeyRect(int midi) const
+{
+    CRect client; GetClientRect(client); int whites = 0;
+    for(int key = 21; key < midi; key++) if(!ComposerBlackKey(key)) whites++;
+    const int w = client.Width();
+    if(ComposerBlackKey(midi)) return CRect((whites * w / 52) - w / 160, 0, (whites * w / 52) + w / 160, client.Height() * 3 / 5);
+    return CRect(whites * w / 52, 0, (whites + 1) * w / 52, client.Height());
+}
+int CCompositeKeyboard::HitKey(CPoint point) const
+{
+    CRect rect; GetClientRect(rect); if(!rect.PtInRect(point)) return -1;
+    for(int pass = 1; pass >= 0; pass--) for(int midi = 21; midi <= 108; midi++)
+        if(ComposerBlackKey(midi) == (pass != 0) && KeyRect(midi).PtInRect(point)) return midi;
+    return -1;
+}
+static bool ComposerOwns(const ModChannelSettings &track, int midi)
+{
+    return track.inputEnabled && (track.inputUseKeys ? (track.inputKeys[midi / 8] & (1u << (midi % 8))) != 0
+        : midi + NOTE_MIN >= track.inputNoteMin && midi + NOTE_MIN <= track.inputNoteMax);
+}
+void CCompositeKeyboard::OnPaint()
+{
+    CPaintDC target(this); DrawKeyboard(target);
+}
+void CCompositeKeyboard::DrawKeyboard(CDC &target)
+{
+    CRect client; GetClientRect(client); CDC dc; dc.CreateCompatibleDC(&target);
+    CBitmap bitmap; bitmap.CreateCompatibleBitmap(&target, client.Width(), client.Height()); auto *old = dc.SelectObject(&bitmap);
+    dc.FillSolidRect(client, RGB(35,38,43)); dc.SetBkMode(TRANSPARENT);
+    for(int pass = 0; pass <= 1; pass++) for(int midi = 21; midi <= 108; midi++)
+    {
+        const bool black = ComposerBlackKey(midi); if(black != (pass != 0)) continue;
+        auto rect = KeyRect(midi); COLORREF base = black ? RGB(33,36,42) : RGB(218,220,225);
+        if(m_owner->m_selected >= 0)
+        {
+            const auto &selected = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
+            if(ComposerOwns(selected, midi)) base = selected.inputColor;
+        }
+        dc.FillSolidRect(rect, base); dc.Draw3dRect(rect, RGB(70,74,82), RGB(70,74,82));
+        int stripe = rect.bottom - 4;
+        for(auto member : m_owner->m_members) if(ComposerOwns(m_owner->tracks[member], midi))
+        {
+            dc.FillSolidRect(rect.left + 2, stripe - 3, std::max(1, rect.Width() - 4), 3, m_owner->tracks[member].inputColor);
+            stripe -= 4; if(stripe < rect.top + 8) break;
+        }
+        if(midi == 60)
+        {
+            dc.SetTextColor(RGB(0,0,0)); CRect label(rect); label.top = rect.bottom * 2 / 3 - 10;
+            dc.DrawText(_T("C"), label, DT_CENTER | DT_SINGLELINE); dc.FillSolidRect(rect.left + rect.Width()/2 - 2, label.top - 5, 4, 4, RGB(0,0,0));
+        }
+    }
+    target.BitBlt(0,0,client.Width(),client.Height(),&dc,0,0,SRCCOPY); dc.SelectObject(old);
+}
+void CCompositeKeyboard::OnLButtonDown(UINT flags, CPoint point)
+{
+    if(m_owner->m_selected < 0 || !m_owner->StoreLane()) return;
+    m_anchor = HitKey(point); if(m_anchor < 0) return;
+    auto &track = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
+    if(!track.inputUseKeys)
+    {
+        track.inputKeys.fill(0);
+        for(int key = track.inputNoteMin - NOTE_MIN; key <= track.inputNoteMax - NOTE_MIN; key++) track.inputKeys[key / 8] |= uint8(1u << (key % 8));
+    }
+    m_before = track.inputKeys; m_add = (flags & MK_CONTROL) != 0;
+    m_remove = m_add && (m_before[m_anchor / 8] & (1u << (m_anchor % 8))) != 0;
+    SetCapture(); Apply(point);
+}
+void CCompositeKeyboard::Apply(CPoint point)
+{
+    int end = HitKey(point); if(m_anchor < 0 || end < 0) return;
+    auto &track = m_owner->tracks[m_owner->m_members[m_owner->m_selected]];
+    track.inputUseKeys = true; track.inputKeys = m_add ? m_before : std::array<uint8,15>{};
+    for(int key = std::min(m_anchor,end); key <= std::max(m_anchor,end); key++)
+        if(m_remove) track.inputKeys[key / 8] &= uint8(~(1u << (key % 8))); else track.inputKeys[key / 8] |= uint8(1u << (key % 8));
+    track.inputEnabled = true; m_owner->CheckDlgButton(IDC_COMPOSITE_ROUTE, BST_CHECKED); Invalidate(FALSE);
+}
+void CCompositeKeyboard::OnMouseMove(UINT flags, CPoint point) { if(GetCapture() == this && (flags & MK_LBUTTON)) Apply(point); }
+void CCompositeKeyboard::OnLButtonUp(UINT, CPoint point) { if(GetCapture() == this) { Apply(point); m_anchor = -1; ReleaseCapture(); } }
 
 OPENMPT_NAMESPACE_END

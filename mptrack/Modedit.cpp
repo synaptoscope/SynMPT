@@ -114,6 +114,12 @@ bool CModDoc::RemoveChannels(const std::vector<bool> &keepMask, bool verbose)
 		if(keep)
 			nRemainingChannels++;
 	}
+    if(!nRemainingChannels && m_SndFile.m_synmptVersion)
+    {
+        if(ReArrangeChannels({CHANNELINDEX_INVALID}) == CHANNELINDEX_INVALID) return false;
+        m_SndFile.ChnSettings[0].isPlaceholder = true;
+        SetModified(); UpdateAllViews(nullptr, UpdateHint().ModType()); return true;
+    }
 	if(nRemainingChannels == GetNumChannels() || nRemainingChannels < m_SndFile.GetModSpecifications().channelsMin)
 	{
 		if(verbose)

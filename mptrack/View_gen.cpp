@@ -10,6 +10,7 @@
 
 
 #include "stdafx.h"
+#include "ComposerColors.h"
 #include "View_gen.h"
 #include "AbstractVstEditor.h"
 #include "Childfrm.h"
@@ -949,6 +950,7 @@ void CViewGlobals::OnEditName(const CHANNELINDEX chnMod4, const UINT itemID)
 		{
 			PrepareUndo(chnMod4);
 			sndFile.ChnSettings[nChn].szName = s;
+            SynMPTApplyAutoColor(sndFile.ChnSettings[nChn]);
 			pModDoc->SetModified();
 			pModDoc->UpdateAllViews(this, GeneralHint(nChn).Channels());
 		}

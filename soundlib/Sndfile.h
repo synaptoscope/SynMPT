@@ -927,12 +927,16 @@ public:
 	// Repair non-standard stuff in modules saved with previous ModPlug versions
 	void UpgradeModule();
 
+    double m_synMasterLeft = 1.0, m_synMasterRight = 1.0;
+    uint16 m_synmptVersion = 0; // SNPR identity; musical data remains compatible with the MPTM engine.
+    bool IsEmptyWorkspace() const { return ChnSettings.size() == 1 && ChnSettings[0].isPlaceholder; }
 	// Save Functions
 #ifndef MODPLUG_NO_FILESAVE
 	bool SaveXM(std::ostream &f, bool compatibilityExport = false);
 	bool SaveS3M(std::ostream &f) const;
 	bool SaveMod(std::ostream &f) const;
 	bool SaveIT(std::ostream &f, const mpt::PathString &filename, bool compatibilityExport = false);
+
 	uint32 SaveMixPlugins(std::ostream *file=nullptr, bool bUpdate=true);
 	void SaveExtendedInstrumentProperties(INSTRUMENTINDEX instr, MODTYPE forceType, std::ostream &f) const;
 	static void SaveExtendedInstrumentProperties(mpt::span<const ModInstrument * const> instruments, MODTYPE forceType, std::ostream &f, bool allInstruments);

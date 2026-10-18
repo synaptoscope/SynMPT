@@ -7,7 +7,7 @@ namespace SynMPTChecks {
 struct ChromeFrameState
 {
     HWND client=nullptr;
-    int nativeHover=0, nativeDraw=0, captionPaint=0, nativeButtonDown=0;
+    int nativeHover=0, nativeDraw=0, captionPaint=0, nativeButtonDown=0, uahPaint=0, captionCursor=0;
     bool probeCaption=false, activationPaint=false;
     UINT command=0;
 };
@@ -19,6 +19,8 @@ inline LRESULT CALLBACK ChromeFrameProc(HWND window,UINT message,WPARAM wParam,L
     if(state && message==WM_DRAWITEM)state->nativeDraw++;
     if(state && state->probeCaption)
     {
+        if(message==0x00AE || message==0x00AF) state->uahPaint++;
+        if(message==WM_SETCURSOR && LOWORD(lParam)==HTCAPTION) state->captionCursor++;
         if(message == WM_NCPAINT)
         {
             TITLEBARINFOEX title{}; title.cbSize=sizeof(title);
@@ -161,6 +163,9 @@ inline void CheckHoverChrome(std::ostream &log)
         }
         // Native movement/layout notifications must not reopen the classic painter.
         ::SendMessage(target,WM_ENTERSIZEMOVE,0,0);
+        ::SendMessage(target,0x00AE,0,0); ::SendMessage(target,0x00AF,0,0);
+        ::SendMessage(target,WM_SETCURSOR,reinterpret_cast<WPARAM>(target),MAKELPARAM(HTCAPTION,WM_MOUSEMOVE));
+        check(probe.uahPaint==0 && probe.captionCursor==0,"native caption theme/cursor paths remain excluded during movement");
         ::SetWindowPos(target,nullptr,30,40,500,250,SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
         ::SendMessage(target,WM_NCPAINT,1,0);
         ::SendMessage(target,WM_EXITSIZEMOVE,0,0);

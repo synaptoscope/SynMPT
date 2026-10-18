@@ -144,6 +144,8 @@ public:
 	};
 	NoteToChannelMap m_noteChannel;	// Note -> Preview channel assignment
 
+    mpt::PathString m_conversionSource;
+    bool MakeNativeProject();
 	bool m_ShowSavedialog = false;
 	bool m_bHasValidPath = false; //becomes true if document is loaded or saved.
 

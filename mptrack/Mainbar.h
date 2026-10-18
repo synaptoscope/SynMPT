@@ -175,7 +175,9 @@ class CDocumentTabBar;
 class CDocumentTabCtrl : public CTabCtrl
 {
     CDocumentTabBar &m_owner;
-    HWND m_pressedClose = nullptr;
+    HWND m_pressedClose = nullptr, m_dragFrame = nullptr;
+    CPoint m_dragStart;
+    bool m_tabDragging = false;
     CString m_tooltipText;
 public:
     explicit CDocumentTabCtrl(CDocumentTabBar &owner) : m_owner(owner) { }
@@ -186,6 +188,7 @@ protected:
     afx_msg void OnLButtonDown(UINT flags, CPoint point);
     afx_msg void OnLButtonUp(UINT flags, CPoint point);
     afx_msg void OnMButtonUp(UINT flags, CPoint point);
+    afx_msg void OnMouseMove(UINT flags, CPoint point);
     afx_msg void OnCaptureChanged(CWnd *window);
     afx_msg BOOL OnToolTipText(UINT, NMHDR *header, LRESULT *result);
     DECLARE_MESSAGE_MAP()

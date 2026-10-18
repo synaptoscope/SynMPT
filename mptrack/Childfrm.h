@@ -47,6 +47,8 @@ struct PatternViewState
 	uint16 defaultTrackWidth = 0;
 	std::vector<bool> selectedTracks, soloTracks, collapsedFolders;
 	CHANNELINDEX armedComposite = CHANNELINDEX_INVALID;
+    ROWINDEX stepLength = 0;
+    bool stepAdvance = true;
 	CHANNELINDEX trackSelectionAnchor = CHANNELINDEX_INVALID;
 	bool initialized = false;
 

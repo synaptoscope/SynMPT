@@ -339,6 +339,31 @@ samplecount_t CSoundFile::Read(samplecount_t count, IAudioTarget &target, IAudio
 			ProcessDSP(countChunk);
 		}
 
+        // The master track also controls internal plugin returns and mixer DSP.
+        for(CHANNELINDEX master=0;master<GetNumChannels();master++) if(ChnSettings[master].isMaster)
+        {
+            const auto &state=m_PlayState.Chn[master];
+            const bool muted=state.dwFlags[CHN_MUTE|CHN_SYNCMUTE] || ChnSettings[master].dwFlags[CHN_MUTE];
+            const double volume=muted?0.0:Clamp<int>(state.nGlobalVol,0,64)/64.0;
+            const int pan=Clamp<int>(state.nPan,0,256);
+            const double left=volume*(pan<=128?128:256-pan)/128.0, right=volume*(pan>=128?128:pan)/128.0;
+            for(samplecount_t frame=0;frame<countChunk;frame++)
+            {
+                m_synMasterLeft+=(left-m_synMasterLeft)/64.0; m_synMasterRight+=(right-m_synMasterRight)/64.0;
+                if(m_MixerSettings.gnChannels==1) MixSoundBuffer[frame]=static_cast<mixsample_t>(MixSoundBuffer[frame]*(m_synMasterLeft+m_synMasterRight)*0.5);
+                else
+                {
+                    MixSoundBuffer[frame*2]=static_cast<mixsample_t>(MixSoundBuffer[frame*2]*m_synMasterLeft);
+                    MixSoundBuffer[frame*2+1]=static_cast<mixsample_t>(MixSoundBuffer[frame*2+1]*m_synMasterRight);
+                    if(m_MixerSettings.gnChannels==4)
+                    {
+                        MixRearBuffer[frame*2]=static_cast<mixsample_t>(MixRearBuffer[frame*2]*m_synMasterLeft);
+                        MixRearBuffer[frame*2+1]=static_cast<mixsample_t>(MixRearBuffer[frame*2+1]*m_synMasterRight);
+                    }
+                }
+            }
+            break;
+        }
 #ifdef MODPLUG_TRACKER
 		// Metronome needs to be mixed last, so that it is not affected by global volume, plugins, DSP effects, etc...
 		// It will still be visible on VU Meters though, which is not optimal.

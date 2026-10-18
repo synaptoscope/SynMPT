@@ -39,6 +39,7 @@ OPENMPT_NAMESPACE_BEGIN
 
 
 BEGIN_MESSAGE_MAP(CCtrlPatterns, CModControlDlg)
+    ON_COMMAND_RANGE(ID_COMPOSER_ADD_TRACK, ID_COMPOSER_DELETE, &CCtrlPatterns::OnComposerCommand)
 	//{{AFX_MSG_MAP(CCtrlPatterns)
 	ON_WM_KEYDOWN()
 	ON_WM_VSCROLL()
@@ -208,7 +209,12 @@ void CCtrlPatterns::OnDPIChanged()
 }
 
 
-Setting<LONG> &CCtrlPatterns::GetSplitPosRef() { return TrackerSettings::Instance().glPatternWindowHeight; }
+Setting<LONG> &CCtrlPatterns::GetSplitPosRef()
+{
+    auto &height=TrackerSettings::Instance().glPatternWindowHeight;
+    if(height<210) height=210;
+    return height;
+}
 
 
 void CCtrlPatterns::RecalcLayout()

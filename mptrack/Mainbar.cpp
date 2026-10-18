@@ -1873,6 +1873,7 @@ static constexpr UINT WM_DOCUMENT_TABS_REFRESH = WM_USER + 2;
 static constexpr UINT DOCUMENT_TABS_CONTROL = 1;
 
 BEGIN_MESSAGE_MAP(CDocumentTabCtrl, CTabCtrl)
+    ON_WM_MOUSEMOVE()
     ON_WM_LBUTTONDOWN()
     ON_WM_LBUTTONUP()
     ON_WM_MBUTTONUP()
@@ -1923,6 +1924,8 @@ void CDocumentTabCtrl::OnLButtonDown(UINT flags, CPoint point)
         m_pressedClose = m_owner.FrameAt(index); SetCapture(); return;
     }
     CTabCtrl::OnLButtonDown(flags, point);
+    m_dragFrame=m_owner.FrameAt(index); m_dragStart=point; m_tabDragging=false;
+    if(m_dragFrame) SetCapture();
 }
 
 void CDocumentTabCtrl::OnLButtonUp(UINT flags, CPoint point)
@@ -1936,7 +1939,31 @@ void CDocumentTabCtrl::OnLButtonUp(UINT flags, CPoint point)
         if(frame == m_owner.FrameAt(index) && CloseRect(index).PtInRect(point)) m_owner.CloseTab(index);
         return;
     }
+    const auto dragged=m_dragFrame; const bool moved=m_tabDragging;
+    m_dragFrame=nullptr; m_tabDragging=false; if(GetCapture()==this) ReleaseCapture();
+    CRect client; GetClientRect(client); client.InflateRect(12,12);
+    if(dragged && moved && !client.PtInRect(point))
+    {
+        auto *frame=DYNAMIC_DOWNCAST(CChildFrame,CWnd::FromHandlePermanent(dragged));
+        if(frame) { frame->ActivateView(IDD_CONTROL_PATTERNS,-1); frame->PostMessage(WM_COMMAND,ID_COMPOSER_DETACH); }
+    }
     CTabCtrl::OnLButtonUp(flags, point);
+}
+
+void CDocumentTabCtrl::OnMouseMove(UINT flags, CPoint point)
+{
+    if(m_dragFrame && (flags & MK_LBUTTON))
+    {
+        m_tabDragging |= std::abs(point.x-m_dragStart.x)+std::abs(point.y-m_dragStart.y)>6;
+        TCHITTESTINFO hit{}; hit.pt=point; const int target=HitTest(&hit);
+        const auto from=std::find_if(m_owner.m_entries.begin(),m_owner.m_entries.end(),[&](const auto &entry){return entry.frame==m_dragFrame;});
+        if(m_tabDragging && target>=0 && from!=m_owner.m_entries.end())
+        {
+            const int source=static_cast<int>(from-m_owner.m_entries.begin());
+            if(source!=target) { auto entry=*from; m_owner.m_entries.erase(from); m_owner.m_entries.insert(m_owner.m_entries.begin()+target,entry); m_owner.RequestRefresh(); }
+        }
+    }
+    CTabCtrl::OnMouseMove(flags,point);
 }
 
 void CDocumentTabCtrl::OnMButtonUp(UINT, CPoint point)
@@ -1947,7 +1974,7 @@ void CDocumentTabCtrl::OnMButtonUp(UINT, CPoint point)
 
 void CDocumentTabCtrl::OnCaptureChanged(CWnd *window)
 {
-    m_pressedClose = nullptr; CTabCtrl::OnCaptureChanged(window);
+    m_pressedClose = nullptr; m_dragFrame=nullptr; m_tabDragging=false; CTabCtrl::OnCaptureChanged(window);
 }
 
 INT_PTR CDocumentTabCtrl::OnToolHitTest(CPoint point, TOOLINFO *info) const
@@ -1964,7 +1991,7 @@ BOOL CDocumentTabCtrl::OnToolTipText(UINT, NMHDR *header, LRESULT *)
 {
     const auto index = static_cast<int>(header->idFrom) - 1;
     if(index < 0 || index >= static_cast<int>(m_owner.m_entries.size())) return FALSE;
-    m_tooltipText = m_owner.m_entries[index].tooltip + _T("\r\nClick \u00d7 or middle-click to close.");
+    m_tooltipText = m_owner.m_entries[index].tooltip + _T("\r\nDrag to reorder; drag outside the tabs to open another song window. Click \u00d7 or middle-click to close.");
     reinterpret_cast<TOOLTIPTEXT *>(header)->lpszText = m_tooltipText.GetBuffer();
     ::SendMessage(header->hwndFrom, TTM_SETMAXTIPWIDTH, 0, HighDPISupport::ScalePixels(700, m_hWnd));
     return TRUE;
@@ -2042,13 +2069,18 @@ LRESULT CDocumentTabBar::OnRefresh(WPARAM, LPARAM)
             break;
         }
     }
+    // Keep the user's tab order when document titles and activation refresh.
+    std::stable_sort(entries.begin(),entries.end(),[&](const Entry &a,const Entry &b) {
+        const auto rank=[&](HWND frame){return std::find_if(m_entries.begin(),m_entries.end(),[&](const auto &entry){return entry.frame==frame;})-m_entries.begin();};
+        return rank(a.frame)<rank(b.frame);
+    });
     bool rebuild = entries.size() != m_entries.size();
     for(size_t i = 0; !rebuild && i < entries.size(); i++) rebuild = entries[i].frame != m_entries[i].frame;
     if(rebuild) { m_tabs.SetRedraw(FALSE); m_tabs.DeleteAllItems(); }
     for(size_t i = 0; i < entries.size(); i++)
     {
         if(rebuild) m_tabs.InsertItem(static_cast<int>(i), entries[i].title);
-        else if(entries[i].title != m_entries[i].title)
+        else
         {
             TCITEM item{}; item.mask = TCIF_TEXT; item.pszText = entries[i].title.GetBuffer();
             m_tabs.SetItem(static_cast<int>(i), &item);
@@ -2072,7 +2104,12 @@ void CDocumentTabBar::OnSelectionChanged(NMHDR *, LRESULT *result)
 {
     *result = 0;
     auto *frame = DYNAMIC_DOWNCAST(CChildFrame, CWnd::FromHandlePermanent(FrameAt(m_tabs.GetCurSel())));
-    if(frame) frame->MDIActivate();
+    if(frame)
+    {
+        const auto host=::GetAncestor(frame->m_hWnd,GA_ROOT);
+        if(host!=CMainFrame::GetMainFrame()->m_hWnd) { ::ShowWindow(host,SW_RESTORE); ::SetForegroundWindow(host); }
+        frame->MDIActivate();
+    }
     RequestRefresh();
 }
 

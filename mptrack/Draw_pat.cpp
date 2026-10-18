@@ -568,7 +568,17 @@ void CViewPattern::DrawTrackControls(HDC dc, CHANNELINDEX channel, int lineWidth
 	if(settings.parentBus < GetSoundFile()->GetNumChannels()) route = mpt::ToCString(GetSoundFile()->GetCharsetInternal(), GetSoundFile()->ChnSettings[settings.parentBus].szName.buf);
 	DrawButtonRect(dc, lineWidth, routeRect, route.GetString());
 	auto instrumentRect = GetTrackControlRect(channel, DragItem::ChannelInstrument);
-	DrawButtonRect(dc, lineWidth, instrumentRect, GetTrackInstrumentLabel(channel).GetString());
+    auto labelRect=instrumentRect;
+    if(settings.isBus && !settings.isMaster) labelRect.left+=MulDiv(20,m_dpi,96);
+	DrawButtonRect(dc, lineWidth, labelRect, GetTrackInstrumentLabel(channel).GetString());
+    if(settings.isBus && !settings.isMaster)
+    {
+        CRect piano(instrumentRect.left+2,instrumentRect.top+3,labelRect.left-2,instrumentRect.bottom-3);
+        ::SetDCBrushColor(dc,RGB(224,229,235)); ::FillRect(dc,piano,GetStockBrush(DC_BRUSH));
+        ::SetDCBrushColor(dc,RGB(40,44,50));
+        for(int key=1;key<4;key++) { CRect line(piano.left+piano.Width()*key/4,piano.top,piano.left+piano.Width()*key/4+lineWidth,piano.bottom); ::FillRect(dc,line,GetStockBrush(DC_BRUSH)); }
+        for(int key: {1,2,3}) { CRect black(piano.left+piano.Width()*key/4-lineWidth,piano.top,piano.left+piano.Width()*key/4+lineWidth,piano.top+piano.Height()*3/5); ::FillRect(dc,black,GetStockBrush(DC_BRUSH)); }
+    }
 	const auto brush = GetStockBrush(DC_BRUSH);
 	const auto oldFont = ::SelectObject(dc, CMainFrame::GetGUIFont());
 	const int oldMode = ::SetBkMode(dc, TRANSPARENT);
@@ -749,6 +759,13 @@ void CViewPattern::OnDraw(CDC *pDC)
     }
 	if ((pModDoc = GetDocument()) == nullptr)
 		return;
+    if(pModDoc->GetSoundFile().IsEmptyWorkspace())
+    {
+        CRect empty; GetClientRect(empty); pDC->FillSolidRect(empty, SynMPTTheme::Color(COLOR_BTNFACE));
+        pDC->SetBkMode(TRANSPARENT); pDC->SetTextColor(SynMPTTheme::Color(COLOR_BTNTEXT));
+        pDC->DrawText(_T("Start with + Track or + Preset above."), empty, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
 	m_chnState.resize(pModDoc->GetNumChannels());
 	if(m_trackSelection.Size() != pModDoc->GetNumChannels())
 		m_trackSelection.Click(std::min<CHANNELINDEX>(GetCurrentChannel(), pModDoc->GetNumChannels() - 1), pModDoc->GetNumChannels(), false, false);
@@ -1016,6 +1033,11 @@ void CViewPattern::OnDraw(CDC *pDC)
 					// Drop position depends on whether hovered channel is left or right of dragged item.
 					r.left = (m_nDropItem.Value() < m_nDragItem.Value() || m_Status[psShiftDragging]) ? rect.left : rect.right - dropWidth;
 					r.right = r.left + dropWidth;
+                    if(m_composerDragging)
+                    {
+                        if(m_composerGroupDrop) r=CRect(rect.right-dropWidth,rect.top,rect.right,m_szHeader.cy);
+                        else r=CRect(m_composerAfter?rect.left+rect.Width()/2:rect.left,rect.top,m_composerAfter?rect.right:rect.left+rect.Width()/2,rect.top+dropWidth);
+                    }
 
 					::SetDCBrushColor(m_offScreenDC, textColor);
 					::FillRect(m_offScreenDC, r, dcBrush);

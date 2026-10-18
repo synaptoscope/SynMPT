@@ -177,7 +177,7 @@ static constexpr ModFormatInfo otherFormatInfo[] =
 
 std::vector<const char *> CSoundFile::GetSupportedExtensions(bool otherFormats)
 {
-	std::vector<const char *> exts;
+	std::vector<const char *> exts{"synmpt"};
 	for(const auto &formatInfo : modFormatInfo)
 	{
 		// Avoid dupes in list
@@ -223,6 +223,7 @@ static bool IsEqualExtension(std::string_view a, std::string_view b)
 
 bool CSoundFile::IsExtensionSupported(std::string_view ext)
 {
+    if(IsEqualExtension(ext,"synmpt")) return true;
 	if(ext.length() == 0)
 	{
 		return false;

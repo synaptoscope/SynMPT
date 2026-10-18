@@ -208,21 +208,40 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
         automation={};file->ChnSettings[0].parentBus=CHANNELINDEX_INVALID;file->ChnSettings[0].trackInstrument=2;
         auto swapped=render();check(std::abs(swapped.left/base.left-0.25)<0.03,"track instrument override must change playback");
         file->ChnSettings[0].parentBus=2;file->ChnSettings[2].parentBus=3;file->ChnSettings[2].dwFlags.set(CHN_MUTE);
-        const auto saved=directory+P_("synmpt-runtime-roundtrip.mptm");
+        file->m_synmptVersion=1;
+        file->ChnSettings[1].inputUseKeys=true; file->ChnSettings[1].inputKeys[5]=0x42;
+        file->ChnSettings[1].inputFixedNote=NOTE_MIDDLEC; file->ChnSettings[1].inputColor=RGB(20,60,180);
+        file->ChnSettings[1].trackAutoColor=false;
+        const auto saved=directory+P_("synmpt-runtime-roundtrip.synmpt");
         {mpt::IO::ofstream output(saved,std::ios::binary);check(file->SaveIT(output,saved,false),"save MPTM");}
         auto loaded=std::make_unique<CSoundFile>();
         {mpt::IO::ifstream input(saved,std::ios::binary);auto cursor=mpt::IO::make_FileCursor<mpt::PathString>(input);check(loaded->Create(cursor),"reload MPTM");}
         check(loaded->ChnSettings[0].trackInstrument==2 && loaded->ChnSettings[0].parentBus==2 && loaded->ChnSettings[2].parentBus==3 && loaded->ChnSettings[2].isBus && loaded->ChnSettings[2].dwFlags[CHN_MUTE],"MPTM routing/instrument/bus mute round trip");
         check(loaded->ChnSettings[2].compositeInput && loaded->ChnSettings[0].inputEnabled
             && loaded->ChnSettings[1].inputNoteMin==NOTE_MIDDLEC+12 && loaded->ChnSettings[1].inputTranspose==-12,"MPTM composite routing round trip");
-        log<<"PASS: rendered bus gain, nested buses, pan, mute, native bus automation, instrument override and MPTM save/reload including composite rules\n";
+        check(loaded->m_synmptVersion==1 && loaded->ChnSettings[1].inputUseKeys && loaded->ChnSettings[1].inputKeys[5]==0x42
+            && loaded->ChnSettings[1].inputFixedNote==NOTE_MIDDLEC && loaded->ChnSettings[1].inputColor==RGB(20,60,180) && !loaded->ChnSettings[1].trackAutoColor,"native identity and explicit keyboard maps round trip");
+        file->ChnSettings[0].trackInstrument=0; file->ChnSettings[0].parentBus=CHANNELINDEX_INVALID;
+        file->ChnSettings[3].isMaster=true; file->ChnSettings[3].nVolume=32; file->ChnSettings[3].nPan=128;
+        const auto masterHalf=render(); check(std::abs(masterHalf.left/base.left-0.5)<0.03,"master gain controls the final mix");
+        file->ChnSettings[3].nPan=0; const auto masterLeft=render(); check(masterLeft.right<masterLeft.left*0.001,"master balance controls final stereo output");
+        file->ChnSettings[3].dwFlags.set(CHN_MUTE); const auto masterMuted=render(); check(masterMuted.left+masterMuted.right<base.left*0.001,"master mute controls final output");
+        file->ChnSettings[3].dwFlags.reset(CHN_MUTE); file->ChnSettings[3].nPan=128;
+        auto &masterAutomation=*file->Patterns[0].GetpModCommand(0,3); masterAutomation.command=CMD_CHANNELVOLUME; masterAutomation.param=16;
+        const auto masterAutomated=render(); check(std::abs(masterAutomated.left/base.left-0.25)<0.03,"master automation affects final audio");
+        masterAutomation={}; file->ChnSettings[3].isMaster=false;
+        std::vector<ModChannelSettings> keys(2); keys[0].isBus=keys[0].compositeInput=true;
+        keys[1].parentBus=0; keys[1].trackInstrument=1; keys[1].inputEnabled=keys[1].inputUseKeys=true;
+        keys[1].inputKeys[60/8]=uint8(1<<(60%8)); keys[1].inputFixedNote=NOTE_MIDDLEC+12;
+        check(ResolveCompositeInput(keys,0,NOTE_MIDDLEC).size()==1 && ResolveCompositeInput(keys,0,NOTE_MIDDLEC)[0].note==NOTE_MIDDLEC+12 && ResolveCompositeInput(keys,0,NOTE_MIDDLEC+1).empty(),"explicit drum keys route fixed pitch and leave unmapped notes untouched");
+        log<<"PASS: native identity, explicit/fixed keyboard maps, manual color state, final master gain/pan/mute/automation, bus rendering and save/reload\n";
         // A v1 chunk still loads with composite input disabled and default ranges.
         std::string legacy;
         {mpt::IO::ifstream input(saved,std::ios::binary);legacy.assign(std::istreambuf_iterator<char>(input),{});}
-        const auto chunk=legacy.find("SNTK");check(chunk!=std::string::npos && chunk+7+file->GetNumChannels()*8<=legacy.size(),"find saved track extension");
+        const auto chunk=legacy.find("SNTK");check(chunk!=std::string::npos && chunk+7+file->GetNumChannels()*29<=legacy.size(),"find saved track extension");
         const auto source=legacy;legacy[chunk+6]=1;
         for(size_t channel=0;channel<file->GetNumChannels();channel++)
-        {std::copy_n(source.data()+chunk+7+channel*8,5,legacy.data()+chunk+7+channel*5);legacy[chunk+7+channel*5+4]&=3;}
+        {std::copy_n(source.data()+chunk+7+channel*29,5,legacy.data()+chunk+7+channel*5);legacy[chunk+7+channel*5+4]&=3;}
         const auto legacyPath=directory+P_("synmpt-runtime-v1.mptm");
         {mpt::IO::ofstream output(legacyPath,std::ios::binary);output.write(legacy.data(),legacy.size());}
         auto old=std::make_unique<CSoundFile>();

@@ -174,6 +174,7 @@ void CSoundFile::InitializeGlobals(MODTYPE type, CHANNELINDEX numChannels)
 {
 	// Do not add or change any of these values! And if you do, review each and every loader to check if they require these defaults!
 	m_nType = type;
+    m_synmptVersion = 0; m_synMasterLeft = m_synMasterRight = 1.0;
 	MPT_ASSERT(numChannels <= MAX_BASECHANNELS);
 	LimitMax(numChannels, MAX_BASECHANNELS);
 

@@ -151,6 +151,7 @@ protected:
 	void UpdateView(UpdateHint hint, CObject *pHint = nullptr);
 	bool SetActivePage(Page page = Page::Unknown, LPARAM lParam = -1);
 public:
+    LRESULT SelectEditorPage(UINT page, LPARAM parameter = -1);
 	Page GetActivePage() const { return m_nActiveDlg; }
 
 protected:

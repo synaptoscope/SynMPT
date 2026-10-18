@@ -27,8 +27,46 @@ OPENMPT_NAMESPACE_BEGIN
 class CModDoc;
 struct SplitKeyboardSettings;
 
+class CCompositeInputDlg;
+class CCompositeKeyboard : public CWnd
+{
+    CCompositeInputDlg *m_owner = nullptr;
+    int m_anchor = -1;
+    bool m_add = false, m_remove = false;
+    std::array<uint8, 15> m_before{};
+    int HitKey(CPoint point) const;
+    CRect KeyRect(int midi) const;
+    void Apply(CPoint point);
+    void DrawKeyboard(CDC &target);
+protected:
+    afx_msg LRESULT OnPrintClient(CDC *dc, UINT) { DrawKeyboard(*dc); return 0; }
+    afx_msg void OnPaint();
+    afx_msg BOOL OnEraseBkgnd(CDC *) { return TRUE; }
+    afx_msg void OnLButtonDown(UINT flags, CPoint point);
+    afx_msg void OnMouseMove(UINT flags, CPoint point);
+    afx_msg void OnLButtonUp(UINT, CPoint);
+    afx_msg void OnCaptureChanged(CWnd *) { m_anchor = -1; }
+    DECLARE_MESSAGE_MAP()
+public:
+    void Init(CCompositeInputDlg *owner, UINT id);
+};
+
+class CComposerTextDlg : public DialogBase
+{
+    CString m_title, m_help;
+    BOOL OnInitDialog() override;
+    void OnOK() override;
+public:
+    CString value;
+    CComposerTextDlg(CWnd *parent, CString title, CString help, CString initial);
+};
+
 class CCompositeInputDlg : public DialogBase
 {
+    friend class CCompositeKeyboard;
+    CCompositeKeyboard m_keyboard;
+    CComboBox m_fixed;
+    bool m_loading = false;
     CModDoc &m_doc;
     CHANNELINDEX m_bus;
     std::vector<CHANNELINDEX> m_members;
@@ -42,6 +80,10 @@ protected:
     void OnOK() override;
     afx_msg void OnLaneChanged();
     afx_msg void OnSpread();
+    afx_msg void OnRangeChanged();
+    afx_msg void OnClearKeys();
+    afx_msg void OnMapColor();
+    afx_msg void OnDrawItem(int id, LPDRAWITEMSTRUCT item);
     DECLARE_MESSAGE_MAP()
 public:
     std::vector<ModChannelSettings> tracks;

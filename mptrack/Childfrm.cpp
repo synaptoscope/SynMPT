@@ -572,6 +572,7 @@ std::string PatternViewState::Serialize() const
 	for(auto width : trackWidths) mpt::IO::WriteVarInt(f, width);
 	mpt::IO::WriteVarInt(f, collapsedFolders.size());
 	for(bool collapsed : collapsedFolders) mpt::IO::WriteVarInt(f, collapsed ? 1u : 0u);
+    mpt::IO::WriteVarInt(f, stepLength); mpt::IO::WriteVarInt(f, stepAdvance ? 1u : 0u);
 	return std::move(f).str();
 }
 
@@ -601,6 +602,8 @@ void PatternViewState::Deserialize(FileReader &f)
         collapsedFolders.assign(count, false);
         for(size_t i = 0; i < count; i++) { unsigned value = 0; f.ReadVarInt(value); collapsedFolders[i] = value != 0; }
     }
+    f.ReadVarInt(stepLength); stepLength = std::min<ROWINDEX>(stepLength, 1024);
+    unsigned advance=1; f.ReadVarInt(advance); stepAdvance=advance!=0;
 }
 
 

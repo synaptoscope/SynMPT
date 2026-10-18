@@ -190,6 +190,7 @@ protected:
 
 class CCtrlPatterns: public CModControlDlg
 {
+    afx_msg void OnComposerCommand(UINT command) { ::SendMessage(m_hWndView, WM_COMMAND, command, 0); }
 	friend class COrderList;
 protected:
 	COrderList m_OrderList;

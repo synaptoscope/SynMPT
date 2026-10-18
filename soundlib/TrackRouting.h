@@ -42,7 +42,8 @@ inline std::vector<bool> TrackSoloSet(const std::vector<ModChannelSettings> &tra
     std::vector<bool> audible(tracks.size(), false);
     for(CHANNELINDEX track = 0; track < tracks.size(); track++)
     {
-        audible[track] = track < selected.size() && selected[track];
+        audible[track] = tracks[track].isMaster || (track < selected.size() && selected[track]);
+        for(size_t master=0;master<tracks.size();master++) if(tracks[master].isMaster && master<selected.size() && selected[master]) audible[track]=true;
         VisitTrackBuses(tracks, track, [&](CHANNELINDEX bus) {
             if(bus < selected.size() && selected[bus]) audible[track] = true;
         });
@@ -65,6 +66,7 @@ TrackBusGain GetTrackBusGain(const std::vector<ModChannelSettings> &tracks, CHAN
 {
     TrackBusGain gain;
     const bool valid = VisitTrackBuses(tracks, track, [&](CHANNELINDEX bus) {
+        if(tracks[bus].isMaster) return; // Applied once to the final mix.
         const auto [volume, pan, muted] = controls(bus);
         gain.left = gain.left * (muted ? 0u : static_cast<uint32>(volume)) / 64u;
         gain.right = gain.right * (muted ? 0u : static_cast<uint32>(volume)) / 64u;

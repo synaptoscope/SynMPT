@@ -549,6 +549,12 @@ bool CModDoc::ChangeModType(MODTYPE nNewType)
 
 	CriticalSection cs;
 	m_SndFile.ChangeModTypeTo(nNewType);
+    if(nNewType!=MOD_TYPE_MPT)
+    {
+        m_SndFile.m_synmptVersion=0;
+        for(auto &track:m_SndFile.ChnSettings) track.isPlaceholder=false;
+        if(oldTypeIsMPT) AddToLog(LogWarning,U_("SynMPT folder routing, composite mappings and master-track settings are not saved by legacy formats. Keep the native project as your editable original."));
+    }
 
 	// In case we need to update IT bidi loop handling pre-computation or loops got changed...
 	m_SndFile.PrecomputeSampleLoops(false);

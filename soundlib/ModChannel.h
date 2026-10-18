@@ -19,6 +19,7 @@
 #include "tuningbase.h"
 
 #include <bitset>
+#include <array>
 
 OPENMPT_NAMESPACE_BEGIN
 
@@ -266,6 +267,13 @@ struct ModChannelSettings
 	bool inputEnabled = false;     // Leaf participates in its composite folder's input.
 	uint8 inputNoteMin = NOTE_MIN, inputNoteMax = NOTE_MAX;
 	int8 inputTranspose = 0;
+    std::array<uint8, 15> inputKeys{}; // MIDI 0..119; explicit masks allow separated drum keys.
+    bool inputUseKeys = false;
+    uint8 inputFixedNote = NOTE_NONE;
+    uint32 inputColor = 0xFFFFFFFF;
+    bool trackAutoColor = true;
+    bool isMaster = false;
+    bool isPlaceholder = false; // One silent engine channel represents an empty workspace.
 
 	mpt::charbuf<MAX_CHANNELNAME> szName;  // Channel name
 };

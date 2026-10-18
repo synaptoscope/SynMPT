@@ -182,6 +182,12 @@ BOOL CModDoc::OnNewDocument()
 	m_SndFile.Create(FileReader(), CSoundFile::loadCompleteModule, this);
 	InitializeMod();
 	m_SndFile.m_PlayState.m_flags.reset(SONG_PATTERNLOOP);
+    if(GetModType() == MOD_TYPE_MPT)
+    {
+        ReArrangeChannels({CHANNELINDEX_INVALID}, false);
+        m_SndFile.ChnSettings[0].isPlaceholder = true;
+        m_SndFile.m_synmptVersion = 1;
+    }
 
 	ReinitRecordState();
 	SetModified(false);
@@ -242,6 +248,8 @@ BOOL CModDoc::OnOpenDocument(LPCTSTR lpszPathName)
 	if((GetModType() == MOD_TYPE_NONE) || (!m_SndFile.GetNumChannels()))
 		return FALSE;
 
+    if(m_SndFile.m_synmptVersion > 1)
+    { Reporting::Error(_T("This SynMPT project uses a newer version. Open it with a newer SynMPT build.")); return FALSE; }
 	// Opening a song starts in song mode; pattern looping is an explicit playback command.
 	m_SndFile.m_PlayState.m_flags.reset(SONG_PATTERNLOOP);
 
@@ -310,6 +318,15 @@ BOOL CModDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		}
 	}
 
+    if(!m_SndFile.m_synmptVersion && !theApp.m_synmptQuietOpen)
+    {
+        const auto choice = Reporting::Confirm(_T("Convert this song to a SynMPT project?\n\nYes: work on a new .synmpt copy.\nNo: keep its current format.\nCancel: close without opening.\n\nThe original file will not be changed."), _T("Open song"), true);
+        if(choice == cnfCancel) return FALSE;
+        if(choice == cnfYes)
+        {
+            if(!MakeNativeProject()) return FALSE;
+        }
+    }
 	return TRUE;
 }
 
@@ -376,8 +393,35 @@ bool CModDoc::OnSaveDocument(const mpt::PathString &filename, const bool setPath
 }
 
 
+bool CModDoc::MakeNativeProject()
+{
+    if(m_SndFile.m_synmptVersion) return true;
+    const auto source=GetPathNameMpt();
+    if(!ChangeModType(MOD_TYPE_MPT)) return false;
+    m_conversionSource=source; m_SndFile.m_synmptVersion=1;
+    m_ShowSavedialog=true; m_bHasValidPath=false; SetModified(); return true;
+}
+
 bool CModDoc::SaveFile(const mpt::PathString &filename, bool allowRelativeSamplePaths)
 {
+    if(m_SndFile.m_synmptVersion)
+    {
+        if(!m_conversionSource.empty() && !mpt::PathCompareNoCase(filename,m_conversionSource))
+        { AddToLog(LogWarning,U_("Choose a new .synmpt filename. The imported original is protected.")); return false; }
+        const auto temporary=filename+mpt::PathString::FromNative(L".saving-"+std::to_wstring(::GetCurrentProcessId())+L"-"+std::to_wstring(::GetTickCount64()));
+        try
+        {
+            {
+                mpt::IO::SafeOutputFile output(temporary,std::ios::binary,mpt::IO::FlushMode::Full); mpt::IO::ofstream &stream=output;
+                stream.exceptions(std::ios::badbit|std::ios::failbit); FixNullStrings();
+                if(!m_SndFile.SaveIT(stream,allowRelativeSamplePaths?filename:mpt::PathString{})) return false;
+                stream.flush();
+            }
+            const auto backup=filename+P_(".bak");
+            if(mpt::native_fs{}.is_file(filename) && !::CopyFile(filename.AsNative().c_str(),backup.AsNative().c_str(),FALSE)) return false;
+            return ::MoveFileEx(temporary.AsNative().c_str(),filename.AsNative().c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE;
+        } catch(const std::exception &) { return false; }
+    }
 	try
 	{
 		mpt::IO::SafeOutputFile sf(filename, std::ios::binary, mpt::IO::FlushModeFromBool(TrackerSettings::Instance().MiscFlushFileBuffersOnSave));
@@ -491,7 +535,7 @@ void CModDoc::DeleteContents()
 BOOL CModDoc::DoSave(const mpt::PathString &filename, bool setPath)
 {
 	const mpt::PathString docFileName = GetPathNameMpt();
-	const mpt::ustring defaultExtension = m_SndFile.GetModSpecifications().GetFileExtension();
+	const mpt::ustring defaultExtension = m_SndFile.m_synmptVersion ? U_("synmpt") : m_SndFile.GetModSpecifications().GetFileExtension();
 
 	switch(m_SndFile.GetBestSaveFormat())
 	{
@@ -531,7 +575,7 @@ BOOL CModDoc::DoSave(const mpt::PathString &filename, bool setPath)
 		FileDialog dlg = SaveFileDialog()
 			.DefaultExtension(defaultExtension)
 			.DefaultFilename(defaultSaveName)
-			.ExtensionFilter(ModTypeToFilter(m_SndFile))
+			.ExtensionFilter(m_SndFile.m_synmptVersion ? CString(_T("SynMPT project (*.synmpt)|*.synmpt||")) : ModTypeToFilter(m_SndFile))
 			.WorkingDirectory(TrackerSettings::Instance().PathSongs.GetWorkingDir());
 		if(!dlg.Show()) return FALSE;
 
@@ -544,17 +588,14 @@ BOOL CModDoc::DoSave(const mpt::PathString &filename, bool setPath)
 	}
 
 	// Do we need to create a backup file ?
-	if((TrackerSettings::Instance().CreateBackupFiles)
+	if((TrackerSettings::Instance().CreateBackupFiles && !m_SndFile.m_synmptVersion)
 		&& (IsModified()) && (!mpt::PathCompareNoCase(saveFileName, docFileName)))
 	{
 		if(mpt::native_fs{}.is_file(saveFileName))
 		{
 			mpt::PathString backupFileName = saveFileName.ReplaceExtension(P_(".bak"));
-			if(mpt::native_fs{}.is_file(backupFileName))
-			{
-				DeleteFile(backupFileName.AsNative().c_str());
-			}
-			MoveFile(saveFileName.AsNative().c_str(), backupFileName.AsNative().c_str());
+            if(!CopyFile(saveFileName.AsNative().c_str(), backupFileName.AsNative().c_str(), FALSE))
+            { Reporting::Error(_T("Could not create the recovery copy. The song was not overwritten.")); return FALSE; }
 		}
 	}
 	if(OnSaveDocument(saveFileName, setPath))
@@ -3152,9 +3193,9 @@ void CModDoc::OnSaveTemplateModule()
 
 	// Ask file name from user.
 	FileDialog dlg = SaveFileDialog()
-		.DefaultExtension(m_SndFile.GetModSpecifications().GetFileExtension())
+		.DefaultExtension(m_SndFile.m_synmptVersion ? U_("synmpt") : m_SndFile.GetModSpecifications().GetFileExtension())
 		.DefaultFilename(sName)
-		.ExtensionFilter(ModTypeToFilter(m_SndFile))
+		.ExtensionFilter(m_SndFile.m_synmptVersion ? CString(_T("SynMPT project (*.synmpt)|*.synmpt||")) : ModTypeToFilter(m_SndFile))
 		.WorkingDirectory(templateFolder);
 	if(!dlg.Show())
 		return;

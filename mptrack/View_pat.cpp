@@ -11,6 +11,9 @@
 
 #include "stdafx.h"
 #include "View_pat.h"
+#include "View_smp.h"
+#include "View_ins.h"
+#include <afxpriv.h>
 #include "../soundlib/CompositeInput.h"
 #include "Childfrm.h"
 #include "Ctrl_pat.h"
@@ -36,6 +39,17 @@
 #include "../soundlib/plugins/PlugInterface.h"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include "FileDialog.h"
+#include "../soundlib/ModInstrument.h"
+#include "ComposerColors.h"
+#include "SynMPTTheme.h"
+#include "mpt/io_file/inputfile.hpp"
+#include "mpt/io_file_read/inputfile_filecursor.hpp"
+#include "mpt/io_file/outputfile.hpp"
+#include "../common/FileReader.h"
 
 
 OPENMPT_NAMESPACE_BEGIN
@@ -48,6 +62,7 @@ int32 CViewPattern::m_nTransposeAmount = 1;
 IMPLEMENT_SERIAL(CViewPattern, CModScrollView, 0)
 
 BEGIN_MESSAGE_MAP(CViewPattern, CModScrollView)
+    ON_COMMAND_RANGE(ID_COMPOSER_ADD_TRACK, ID_COMPOSER_DETACH, &CViewPattern::OnComposerCommand)
 	//{{AFX_MSG_MAP(CViewPattern)
 	ON_WM_ERASEBKGND()
 	ON_WM_VSCROLL()
@@ -699,6 +714,7 @@ void CViewPattern::OnCaptureChanged(CWnd *wnd)
 	m_trackSliderUndo = false;
 	m_automationDragging = false;
 	m_automationLastRow = -1;
+    if(m_composerDragging) { m_composerDragging=false; InvalidatePattern(true,true); }
 	CModScrollView::OnCaptureChanged(wnd);
 }
 
@@ -867,6 +883,8 @@ bool CViewPattern::PrepareUndo(const PatternCursor &beginSel, const PatternCurso
 
 BOOL CViewPattern::PreTranslateMessage(MSG *pMsg)
 {
+    if(pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_ESCAPE && m_composerDragging)
+    { m_composerDragging=false; m_nDragItem=m_nDropItem={}; m_Status.reset(psDragging); ReleaseCapture(); InvalidatePattern(true,true); return TRUE; }
 	if(pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_ESCAPE && m_automationLinePending)
 	{ CancelAutomationLine(); return TRUE; }
 	if(pMsg)
@@ -1321,7 +1339,8 @@ void CViewPattern::OnLButtonDown(UINT nFlags, CPoint point)
 	if(control.Type() == DragItem::ChannelHeader)
 	{
 		const auto channel = static_cast<CHANNELINDEX>(control.Value());
-		if(!CInputHandler::AltPressed() || !m_trackSelection.Contains(channel)) SelectTrackHeader(channel, nFlags);
+        m_composerDragPoint = point; m_composerDragging = false;
+        if(!m_trackSelection.Contains(channel) || (nFlags & (MK_CONTROL | MK_SHIFT))) SelectTrackHeader(channel, nFlags);
 		if(nFlags & (MK_CONTROL | MK_SHIFT))
 		{
 			m_trackHeaderClick = true; m_nDragItem = m_nDropItem = {};
@@ -1524,6 +1543,7 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 
 	const auto dragType = m_nDragItem.Type();
 	const bool wasDraggingRecordGroup = IsDraggingRecordGroup();
+    const bool wasComposerDragging = m_composerDragging;
 	const bool itemSelected = m_bInItemRect || (dragType == DragItem::ChannelHeader);
 	m_bInItemRect = false;
 	ResetRecordGroupDragging();
@@ -1569,6 +1589,10 @@ void CViewPattern::OnLButtonUp(UINT nFlags, CPoint point)
 	switch(m_nDragItem.Type())
 	{
 	case DragItem::ChannelHeader:
+        if(wasComposerDragging && m_composerTarget < modDoc->GetNumChannels())
+        {
+            ComposerMoveTracks(sourceChn, m_composerTarget, point); m_composerDragging = false; InvalidatePattern(true,true); break;
+        }
 		if(sourceChn == targetChn && targetChn < modDoc->GetNumChannels())
 		{
 			// Just clicked a channel header...
@@ -2007,7 +2031,23 @@ void CViewPattern::OnMouseMove(UINT nFlags, CPoint point)
 		}
 
 		m_Status.set(psShiftDragging, (nFlags & MK_SHIFT) != 0);
-		m_nDropItem = GetDragItem(point, m_rcDropItem);
+        if(m_nDragItem.Type() == DragItem::ChannelHeader && !isDraggingRecordGroup)
+        {
+            m_composerDragging |= std::abs(point.x - m_composerDragPoint.x) + std::abs(point.y - m_composerDragPoint.y) > 6;
+            m_composerTarget = CHANNELINDEX_INVALID;
+            for(CHANNELINDEX ch = 0; ch < GetSoundFile()->GetNumChannels(); ch++)
+                if(IsTrackVisible(ch) && point.x >= GetTrackLeft(ch) && point.x < GetTrackLeft(ch) + GetTrackWidth(ch)) { m_composerTarget = ch; break; }
+            if(m_composerTarget < GetSoundFile()->GetNumChannels())
+            {
+                const auto ch = m_composerTarget;
+                m_composerGroupDrop = GetSoundFile()->ChnSettings[ch].isBus && point.y > GetTrackHeaderTop(ch) + MulDiv(22, m_dpi, 96);
+                m_composerAfter = point.x > GetTrackLeft(ch) + GetNoteTrackWidth(ch)/2;
+                m_rcDropItem = CRect(GetTrackLeft(ch), GetTrackHeaderTop(ch), GetTrackLeft(ch) + GetNoteTrackWidth(ch), m_szHeader.cy);
+                m_nDropItem = DragItem(DragItem::ChannelHeader, ch);
+                InvalidatePattern(true, true);
+                CMainFrame::GetMainFrame()->SetInfoText(m_composerGroupDrop ? _T("Release to place the selected tracks inside this folder. Esc cancels.") : _T("Release to move outside the folder, at the highlighted top edge. Esc cancels."));
+            } else m_nDropItem = {};
+        } else m_nDropItem = GetDragItem(point, m_rcDropItem);
 
 		const bool b = (m_nDropItem == m_nDragItem);
 		const bool dragChannel = m_nDragItem.Type() == DragItem::ChannelHeader;
@@ -4657,6 +4697,7 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 			m_trackSelection.Restore(pState->selectedTracks, pState->trackSelectionAnchor);
 			m_trackSoloTargets = pState->soloTracks;
             m_armedComposite = pState->armedComposite;
+            m_stepLength = pState->stepLength; m_stepAdvance = pState->stepAdvance;
             for(size_t i = 0; i < std::min(m_chnState.size(), pState->collapsedFolders.size()); i++) m_chnState[i].folderCollapsed = pState->collapsedFolders[i];
 			for(size_t channel = 0; channel < std::min(m_chnState.size(), pState->automationLanes.size()); channel++)
 			{
@@ -4692,6 +4733,7 @@ LRESULT CViewPattern::OnModViewMsg(WPARAM wParam, LPARAM lParam)
 			pState->selectedTracks = m_trackSelection.Mask();
 			pState->soloTracks = m_trackSoloTargets;
             pState->armedComposite = m_armedComposite;
+            pState->stepLength = m_stepLength; pState->stepAdvance = m_stepAdvance;
             pState->collapsedFolders.resize(m_chnState.size());
             for(size_t i = 0; i < m_chnState.size(); i++) pState->collapsedFolders[i] = m_chnState[i].folderCollapsed;
 			pState->trackSelectionAnchor = static_cast<CHANNELINDEX>(m_trackSelection.Anchor());
@@ -5699,7 +5741,7 @@ void CViewPattern::TempStopNote(ModCommand::NOTE note, const bool fromMidi, bool
 	{
 		return;
 	}
-	if(StopCompositeNote(note, fromMidi)) return;
+	if(StopCompositeNote(note, fromMidi, !m_stepLength || IsLiveRecord())) return;
 	const CModSpecifications &specs = sndFile.GetModSpecifications();
 	Limit(note, specs.noteMin, specs.noteMax);
 
@@ -6112,6 +6154,7 @@ void CViewPattern::TempEnterNote(ModCommand::NOTE note, int vol, bool fromMidi)
 		return;
 	}
 
+    if(ComposerStepNote(note, vol)) return;
 	if(EnterCompositeNote(note, vol, fromMidi)) return;
 	if(note < NOTE_MIN_SPECIAL)
 	{
@@ -7831,6 +7874,8 @@ void CViewPattern::SetSplitKeyboardSettings()
 // Paste pattern data using the given paste mode.
 void CViewPattern::ExecutePaste(PatternClipboard::PasteModes mode)
 {
+    if(GetSoundFile()->IsEmptyWorkspace())
+    { CMainFrame::GetMainFrame()->SetInfoText(_T("Add a track before pasting notes.")); return; }
 	if(IsEditingEnabled_bmsg() && PastePattern(m_nPattern, m_Selection.GetUpperLeft(), mode))
 	{
 		InvalidatePattern(false);
@@ -8391,6 +8436,7 @@ void CViewPattern::ShowTrackInstrumentMenu(CHANNELINDEX channel)
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile();
     if(channel >= file.GetNumChannels()) return;
+    if(file.ChnSettings[channel].isMaster) return;
     if(file.ChnSettings[channel].isBus) { ConfigureCompositeInput(channel); return; }
     if(file.GetType() != MOD_TYPE_MPT)
     { Reporting::Information(_T("Track instrument assignments are saved in MPTM songs. Change the song format to MPTM first.")); return; }
@@ -8449,7 +8495,7 @@ bool CViewPattern::CanGroupTrack(CHANNELINDEX channel, uint16 overrideInstrument
 void CViewPattern::ShowTrackRoutingMenu(CHANNELINDEX channel)
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile();
-    if(channel >= file.GetNumChannels()) return;
+    if(channel >= file.GetNumChannels() || file.ChnSettings[channel].isMaster) return;
     if(file.GetType() != MOD_TYPE_MPT)
     { Reporting::Information(_T("Group bus routing is saved in MPTM songs. Change the song format to MPTM first.")); return; }
     CMenu menu; menu.CreatePopupMenu();
@@ -8457,7 +8503,7 @@ void CViewPattern::ShowTrackRoutingMenu(CHANNELINDEX channel)
     menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING | (file.ChnSettings[channel].parentBus == CHANNELINDEX_INVALID ? MF_CHECKED : 0), 2, _T("Output: Master"));
     for(CHANNELINDEX bus = 0; bus < file.GetNumChannels(); bus++)
-        if(file.ChnSettings[bus].isBus && bus != channel && !TrackBelongsToBus(file.ChnSettings, bus, channel))
+        if(file.ChnSettings[bus].isBus && !file.ChnSettings[bus].isMaster && bus != channel && !TrackBelongsToBus(file.ChnSettings, bus, channel))
             menu.AppendMenu(MF_STRING | (file.ChnSettings[channel].parentBus == bus ? MF_CHECKED : 0), 1000 + bus,
                 MPT_CFORMAT("Output: {} ({})")(mpt::ToCString(file.GetCharsetInternal(), file.ChnSettings[bus].szName.buf), bus + 1));
     auto rect = GetTrackControlRect(channel, DragItem::ChannelRouting); CPoint point(rect.left, rect.bottom); ClientToScreen(&point);
@@ -8490,7 +8536,7 @@ void CViewPattern::CreateGroupBus()
         VisitTrackBuses(file.ChnSettings, track, [&](CHANNELINDEX bus) {
             if(members[bus]) { selected = true; roots[track] = false; }
         });
-        if(selected && !CanGroupTrack(track))
+        if(selected && (!CanGroupTrack(track) || file.ChnSettings[track].isMaster))
         { Reporting::Information(_T("Group buses currently support sample instruments. One selected track uses an external plugin, effect, MIDI output or FM instrument.")); return; }
     }
     CInputDlg name(this, _T("Name for the new group bus:"), _T("Group"), MAX_CHANNELNAME - 1);
@@ -8539,6 +8585,7 @@ void CViewPattern::OnTrackFolderToggle()
 bool CViewPattern::IsTrackVisible(CHANNELINDEX channel) const
 {
     const auto *file = GetSoundFile(); if(!file || channel >= file->GetNumChannels()) return true;
+    if(file->ChnSettings[channel].isPlaceholder) return false;
     bool hidden = false;
     VisitTrackBuses(file->ChnSettings, channel, [&](CHANNELINDEX bus) { if(bus < m_chnState.size() && m_chnState[bus].folderCollapsed) hidden = true; });
     return !hidden;
@@ -8577,7 +8624,7 @@ void CViewPattern::ArrangeTrackFolders()
 bool CViewPattern::ConfigureCompositeInput(CHANNELINDEX channel)
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile();
-    if(channel >= file.GetNumChannels() || !file.ChnSettings[channel].isBus) return false;
+    if(channel >= file.GetNumChannels() || !file.ChnSettings[channel].isBus || file.ChnSettings[channel].isMaster) return false;
     CCompositeInputDlg dialog(*doc, channel, this);
     if(!file.ChnSettings[channel].compositeInput) dialog.enabled = true;
     StopCompositeVoices();
@@ -8595,6 +8642,8 @@ bool CViewPattern::ConfigureCompositeInput(CHANNELINDEX channel)
                 track.inputEnabled = source.inputEnabled; track.inputNoteMin = source.inputNoteMin;
                 track.inputNoteMax = source.inputNoteMax; track.inputTranspose = source.inputTranspose;
                 track.trackInstrument = source.trackInstrument;
+                track.inputKeys = source.inputKeys; track.inputUseKeys = source.inputUseKeys;
+                track.inputFixedNote = source.inputFixedNote; track.inputColor = source.inputColor;
             }
     }
     if(!dialog.enabled && m_armedComposite == channel) m_armedComposite = CHANNELINDEX_INVALID;
@@ -8612,6 +8661,7 @@ bool CViewPattern::IsCompositeTrackArmed(CHANNELINDEX channel) const
 void CViewPattern::ToggleTrackRecord(CHANNELINDEX channel)
 {
     auto *doc = GetDocument(); auto &file = *GetSoundFile();
+    if(file.ChnSettings[channel].isMaster) return;
     if(file.ChnSettings[channel].isBus)
     {
         StopCompositeVoices();
@@ -8969,5 +9019,7 @@ void CViewPattern::UpdateAutomationStroke(CPoint point)
 	if(blocked) info += _T(". Rows with other effects were kept unchanged.");
 	CMainFrame::GetMainFrame()->SetInfoText(info);
 }
+
+#include "ComposerWorkspace.h"
 
 OPENMPT_NAMESPACE_END

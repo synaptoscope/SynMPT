@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #pragma once
 #include "../../mptrack/WindowMessages.h"
+#include "../../mptrack/View_pat.h"
 #include <chrono>
 #include "paint_ownership.h"
 
@@ -82,6 +83,15 @@ inline int RunEditorSwitches(CMainFrame &main, const mpt::PathString &directory)
         }
         check(paintOwnership, "editor backgrounds must preserve the controls and tabs they overlap");
         log << "PASS: 40 settled switches and 24 queued rapid switches across Song/Patterns/Samples/Instruments/Comments; correct views, layouts, visibility and unchanged song\n";
+        log.flush();
+        auto *scratch=theApp.NewDocument(MOD_TYPE_MPT);
+        check(scratch!=nullptr,"create disposable composer document"); drain();
+        auto *scratchFrame=dynamic_cast<CChildFrame *>(main.MDIGetActive());
+        check(scratchFrame!=nullptr,"create composer document frame");
+        scratchFrame->ActivateView(IDD_CONTROL_PATTERNS,-1); drain();
+        auto *pattern=dynamic_cast<CViewPattern *>(CWnd::FromHandlePermanent(scratchFrame->GetHwndView()));
+        check(pattern!=nullptr,"create composer pattern view"); pattern->RunComposerChecks(directory);
+        log << "PASS: empty document, track creation, multi-track grouping undo/redo, embedded preset save/recall, independent samples, fixed key metadata, consecutive steps, ties, unique master, auto/manual colors, detached sample/instrument views, final track deletion and undo\n";
         log << "Longest settled switch: " << worst << " ms (hidden test process, not a desktop smoothness measurement)\nALL CHECKS PASSED\n";
         log.flush(); return 0;
     } catch(const std::exception &error) { log << "FAIL: " << error.what() << '\n'; log.flush(); return 1; }

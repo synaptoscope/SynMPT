@@ -16,8 +16,11 @@ inline std::vector<CompositeNote> ResolveCompositeInput(const std::vector<ModCha
     for(CHANNELINDEX channel = 0; channel < tracks.size(); channel++)
     {
         const auto &track = tracks[channel];
-        const int mapped = note + track.inputTranspose;
-        if(track.isBus || !track.inputEnabled || !track.trackInstrument || note < track.inputNoteMin || note > track.inputNoteMax
+        const int mapped = track.inputFixedNote ? track.inputFixedNote : note + track.inputTranspose;
+        const int key = note - NOTE_MIN;
+        const bool accepts = track.inputUseKeys ? (key >= 0 && key < 120 && (track.inputKeys[key / 8] & (1u << (key % 8))))
+                                               : note >= track.inputNoteMin && note <= track.inputNoteMax;
+        if(track.isBus || !track.inputEnabled || !track.trackInstrument || !accepts
             || mapped < NOTE_MIN || mapped > NOTE_MAX || !TrackBelongsToBus(tracks, channel, bus)) continue;
         result.push_back({channel, static_cast<ModCommand::NOTE>(mapped), track.trackInstrument});
     }

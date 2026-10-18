@@ -517,12 +517,18 @@ void CModControlView::OnTabSelchange(NMHDR*, LRESULT* pResult)
 
 LRESULT CModControlView::OnActivateModView(WPARAM nIndex, LPARAM lParam)
 {
-	if(::GetActiveWindow() != CMainFrame::GetMainFrame()->m_hWnd)
+	if(::GetActiveWindow() != ::GetAncestor(m_hWnd, GA_ROOT))
 	{
 		// If we are in a dialog (e.g. Amplify Sample), do not allow to switch to a different tab. Otherwise, watch the tracker crash!
 		return 0;
 	}
 
+    return SelectEditorPage(static_cast<UINT>(nIndex), lParam);
+}
+
+// Internal window setup does not depend on which top-level editor has focus.
+LRESULT CModControlView::SelectEditorPage(UINT nIndex, LPARAM lParam)
+{
 	if (m_TabCtrl.m_hWnd)
 	{
 		if (static_cast<Page>(nIndex) < Page::NumPages)
