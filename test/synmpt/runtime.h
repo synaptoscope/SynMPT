@@ -249,11 +249,33 @@ inline int Run(const mpt::PathString &directory, const std::vector<mpt::PathStri
         check(old->ChnSettings[2].isBus && old->ChnSettings[0].parentBus==2 && !old->ChnSettings[2].compositeInput
             && !old->ChnSettings[0].inputEnabled && old->ChnSettings[0].inputNoteMin==NOTE_MIN,"v1 songs retain buses without enabling composite input");
         log<<"PASS: backward-compatible v1 track extension\n";
+        for(int variant=0;variant<3;variant++)
+        {
+            auto empty=std::make_unique<CSoundFile>(); empty->Create(MOD_TYPE_MPT,2);
+            if(variant>=1) empty->m_songMessage.SetFormatted("Folder notes",SongMessage::leAutodetect);
+            if(variant==2) { empty->Instruments[1]=new ModInstrument(); empty->m_nInstruments=1; }
+            empty->m_synmptVersion=1; empty->Patterns.Insert(0,64); empty->Order().resize(1,0);
+            empty->ChnSettings[0].isBus=true; empty->ChnSettings[0].szName="Empty folder";
+            empty->ChnSettings[1].parentBus=0; empty->ChnSettings[1].inputEnabled=true;
+            std::stringstream stream(std::ios::in|std::ios::out|std::ios::binary);
+            check(empty->SaveIT(stream,{}),"save preset without assets or nonempty patterns");
+            stream.seekg(0); auto reader=mpt::IO::make_FileCursor<mpt::PathString>(stream);
+            auto reloadedEmpty=std::make_unique<CSoundFile>();
+            check(reloadedEmpty->Create(reader) && reloadedEmpty->m_synmptVersion==1 && reloadedEmpty->GetNumChannels()==2 && reloadedEmpty->ChnSettings[0].isBus
+                && reloadedEmpty->ChnSettings[1].parentBus==0 && reloadedEmpty->ChnSettings[1].inputEnabled,"assetless preset preserves its native identity, hierarchy and mapping");
+            log<<"PASS: assetless preset extension loading\n";
+        }
         for(const auto &song:songs)
         {
             auto playback=std::make_unique<CSoundFile>();
             mpt::IO::ifstream stream(song,std::ios::binary);auto cursor=mpt::IO::make_FileCursor<mpt::PathString>(stream);
             check(playback->Create(cursor),"load reference song");
+            if(!mpt::PathCompareNoCase(song.GetFilenameExtension(),P_(".synpreset")))
+            {
+                check(playback->m_synmptVersion==1 && playback->ChnSettings[0].isBus,"supplied preset retains native identity and root folder");
+                log<<"PASS: supplied preset loads "<<playback->GetNumChannels()<<" tracks, "<<playback->GetNumInstruments()<<" instruments\n";
+                continue;
+            }
             MixerSettings mixer;mixer.gdwMixingFreq=8000;mixer.gnChannels=2;playback->SetMixerSettings(mixer);
             playback->ResetPlayPos();playback->m_PlayState.m_flags.reset(SONG_PATTERNLOOP);playback->SetRepeatCount(0);playback->InitPlayer(true);
             EnergyTarget target;ORDERINDEX furthest=0;

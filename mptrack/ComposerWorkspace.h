@@ -29,6 +29,24 @@ void CViewPattern::ComposerAdd(bool group, bool master)
     m_trackSelection.Click(added,file.GetNumChannels(),false,false); SetCurrentColumn(added); ComposerRefresh();
 }
 
+// A preset needs a stable instrument binding even when an imported track uses
+// instrument numbers in its patterns. Do not silently choose one of several sounds.
+static std::optional<uint16> ResolvePresetInstrument(const CSoundFile &song, CHANNELINDEX channel)
+{
+    const auto &track = song.ChnSettings[channel];
+    if(track.trackInstrument || track.isBus) return track.trackInstrument;
+    uint16 instrument = 0;
+    for(const auto &pattern : song.Patterns)
+        for(ROWINDEX row = 0; row < pattern.GetNumRows(); row++)
+        {
+            const auto &cell = *pattern.GetpModCommand(row, channel);
+            if(cell.IsPcNote() || !cell.instr) continue;
+            if(instrument && instrument != cell.instr) return std::nullopt;
+            instrument = cell.instr;
+        }
+    return instrument;
+}
+
 void CViewPattern::ComposerPreset(bool save, mpt::PathString path)
 {
     auto &song=*GetSoundFile(); auto *doc=GetDocument();
@@ -41,6 +59,18 @@ void CViewPattern::ComposerPreset(bool save, mpt::PathString path)
         std::vector<CHANNELINDEX> members{group};
         for(CHANNELINDEX i=0;i<song.GetNumChannels();i++) if(TrackBelongsToBus(song.ChnSettings,i,group)) members.push_back(i);
         for(auto i:members) if(!CanGroupTrack(i)) { Reporting::Information(_T("Presets currently support internal samples and instruments. Remove external outputs from this folder first.")); return; }
+        std::vector<uint16> bindings;
+        for(auto channel : members)
+        {
+            const auto instrument = ResolvePresetInstrument(song, channel);
+            if(!instrument)
+            {
+                Reporting::Information(MPT_CFORMAT("Track {} ({}) uses several instruments in its patterns. Choose an instrument in that track's header before saving the preset.")(
+                    channel + 1, mpt::ToCString(song.GetCharsetInternal(), song.ChnSettings[channel].szName)));
+                return;
+            }
+            bindings.push_back(*instrument);
+        }
         auto dialog=SaveFileDialog().DefaultExtension(U_("synpreset")).DefaultFilename(mpt::PathString::FromUnicode(U_("Instrument.synpreset")))
             .ExtensionFilter("SynMPT instrument preset (*.synpreset)|*.synpreset||");
         if(path.empty()) { if(!dialog.Show(this)) return; path=dialog.GetFirstFile(); }
@@ -50,6 +80,7 @@ void CViewPattern::ComposerPreset(bool save, mpt::PathString path)
         for(CHANNELINDEX i=0;i<members.size();i++)
         {
             auto track=song.ChnSettings[members[i]];
+            track.trackInstrument=bindings[i];
             const auto parent=std::find(members.begin(),members.end(),track.parentBus);
             track.parentBus=parent==members.end() ? CHANNELINDEX_INVALID : static_cast<CHANNELINDEX>(parent-members.begin());
             if(track.trackInstrument)
@@ -60,7 +91,7 @@ void CViewPattern::ComposerPreset(bool save, mpt::PathString path)
                     const uint16 target=static_cast<uint16>(assets.size()+1); bool ok=false;
                     if(song.GetNumInstruments()) ok=preset->ReadInstrumentFromSong(target,song,source);
                     else if(preset->ReadSampleFromSong(target,song,source))
-                    { preset->Instruments[target]=new ModInstrument(target); preset->m_nInstruments=target; ok=true; }
+                    { preset->Instruments[target]=new ModInstrument(target); preset->Instruments[target]->name=song.GetSampleName(source); preset->m_nInstruments=target; ok=true; }
                     if(!ok) { Reporting::Error(_T("The preset could not copy an instrument. Nothing was saved.")); return; }
                     assets[source]=target;
                 }
@@ -395,6 +426,15 @@ void CViewPattern::RunComposerChecks(const mpt::PathString &directory)
     auto &file=*GetSoundFile(); auto *doc=GetDocument();
     m_Status.set(psRecordingEnabled);
     check(file.IsEmptyWorkspace() && file.m_synmptVersion==1,"native new document is an empty workspace");
+    ComposerAdd(true);
+    const auto emptyPreset=directory+P_("composer-empty.synpreset"); ComposerPreset(true,emptyPreset);
+    {
+        auto loaded=std::make_unique<CSoundFile>(); mpt::IO::InputFile input(emptyPreset); auto reader=GetFileReader(input);
+        check(loaded->Create(reader) && loaded->m_synmptVersion==1 && loaded->ChnSettings[0].isBus,"empty preset retains native identity and folder metadata without samples or pattern data");
+    }
+    ComposerPreset(false,emptyPreset);
+    check(file.GetNumChannels()==2 && file.ChnSettings[1].isBus,"empty preset loads through the preset command");
+    doc->RemoveChannels(std::vector<bool>(file.GetNumChannels(),false));
     ComposerAdd(true); ComposerAdd(false); ComposerAdd(false);
     check(file.GetNumChannels()==3 && file.ChnSettings[0].isBus && !file.IsEmptyWorkspace(),"create folder and children from empty workspace");
     m_trackSelection.Click(1,3,false,false); m_trackSelection.Click(2,3,true,false); m_composerGroupDrop=true; m_composerAfter=false;
@@ -408,9 +448,21 @@ void CViewPattern::RunComposerChecks(const mpt::PathString &directory)
     for(auto ch:{1,2}) { file.ChnSettings[ch].trackInstrument=1; file.ChnSettings[ch].inputEnabled=true; }
     file.ChnSettings[1].inputUseKeys=true; file.ChnSettings[1].inputKeys.fill(0); file.ChnSettings[1].inputKeys[60/8]|=uint8(1<<(60%8));
     file.ChnSettings[1].inputFixedNote=NOTE_MIDDLEC; file.ChnSettings[1].inputColor=RGB(77,188,215);
+    // Imported lanes display their instrument from pattern notes without a header override.
+    file.ChnSettings[1].trackInstrument=0;
+    file.m_szNames[1]="Pattern guitar";
+    auto &reference=*file.Patterns[0].GetpModCommand(0,1); reference.note=NOTE_MIDDLEC; reference.instr=1;
+    auto &other=*file.Patterns[0].GetpModCommand(1,1); other.instr=2;
+    check(!ResolvePresetInstrument(file,1),"multiple pattern instruments require an explicit choice");
+    file.ChnSettings[1].trackInstrument=1;
+    check(ResolvePresetInstrument(file,1)==1,"explicit preset binding takes precedence over pattern instruments");
+    file.ChnSettings[1].trackInstrument=0; other={};
     SetCurrentColumn(0); const auto preset=directory+P_("composer-roundtrip.synpreset"); ComposerPreset(true,preset);
+    check(file.ChnSettings[1].trackInstrument==0,"saving a pattern-derived preset leaves source track assignments unchanged");
     ComposerPreset(false,preset);
     check(file.GetNumChannels()==6 && file.ChnSettings[4].parentBus==3 && file.ChnSettings[5].parentBus==3,"preset restores independent folder hierarchy");
+    check(file.ChnSettings[4].trackInstrument==file.ChnSettings[5].trackInstrument && file.ChnSettings[4].trackInstrument!=0,"pattern-derived and explicit references embed one shared instrument per preset instance");
+    check(file.Instruments[file.ChnSettings[4].trackInstrument]->name==std::string("Pattern guitar"),"preset preserves sample-based instrument names");
     check(file.ChnSettings[4].inputUseKeys && file.ChnSettings[4].inputKeys[60/8] && file.ChnSettings[4].inputColor==RGB(77,188,215),"preset preserves keyboard ownership and color");
     const auto recalled=file.ChnSettings[4].trackInstrument;
     check(recalled!=file.ChnSettings[1].trackInstrument && file.Instruments[recalled],"preset uses independent instrument slots");
@@ -500,4 +552,74 @@ void CViewPattern::RunComposerChecks(const mpt::PathString &directory)
     for(auto host:hosts) ::SendMessage(host,WM_CLOSE,0,0);
     views=0; position=doc->GetFirstViewPosition(); while(position) { doc->GetNextView(position); views++; }
     check(views==2,"closing separate editors keeps the original song and its views alive");
+    doc->RemoveChannels(std::vector<bool>(file.GetNumChannels(),false));
+    ComposerPreset(false,preset);
+    check(file.GetNumChannels()==3 && file.ChnSettings[0].isBus && file.ChnSettings[1].parentBus==0 && !file.IsEmptyWorkspace(),"preset replaces the empty workspace placeholder with its folder and children");
+    const auto fresh=file.ChnSettings[1].trackInstrument;
+    check(fresh && file.Instruments[fresh] && file.GetSample(file.Instruments[fresh]->Keyboard[0]).sample8()[4]==-12,"preset recalled into an empty workspace contains playable sample bytes");
+    // Optional local reproduction files. Read-only inputs; recovered output is kept
+    // in the isolated test directory. No owner paths or media enter the repository.
+    const auto fixturePath=[](const wchar_t *name) {
+        wchar_t value[32768]{}; const auto size=::GetEnvironmentVariableW(name,value,std::size(value));
+        return size>0 && size<std::size(value) ? mpt::PathString::FromNative(value) : mpt::PathString{};
+    };
+    const auto suppliedPreset=fixturePath(L"SYNMPT_CHECK_PRESET");
+    const auto suppliedSource=fixturePath(L"SYNMPT_CHECK_SOURCE");
+    if(!suppliedPreset.empty())
+    {
+        const auto base=file.GetNumChannels(); ComposerPreset(false,suppliedPreset);
+        check(file.GetNumChannels()>base && file.ChnSettings[base].isBus,"supplied preset loads through the actual preset command");
+        if(!suppliedSource.empty())
+        {
+            auto source=std::make_unique<CSoundFile>(); mpt::IO::InputFile input(suppliedSource); auto reader=GetFileReader(input);
+            check(source->Create(reader),"load read-only source song for preset recovery");
+            std::map<uint16,uint16> recoveredAssets;
+            for(CHANNELINDEX channel=base;channel<file.GetNumChannels();channel++)
+            {
+                auto &track=file.ChnSettings[channel]; if(track.isBus) continue;
+                CHANNELINDEX match=CHANNELINDEX_INVALID; size_t matches=0;
+                for(CHANNELINDEX sourceChannel=0;sourceChannel<source->GetNumChannels();sourceChannel++)
+                    if(source->ChnSettings[sourceChannel].szName==track.szName) { match=sourceChannel; matches++; }
+                check(matches==1,"each recovered child has exactly one source track with the same name");
+                const auto instrument=ResolvePresetInstrument(*source,match);
+                check(instrument && *instrument,"each recovered child has one unambiguous pattern instrument");
+                if(!recoveredAssets.count(*instrument))
+                {
+                    const auto target=static_cast<INSTRUMENTINDEX>(file.GetNumInstruments()+1);
+                    if(source->GetNumInstruments()) check(file.ReadInstrumentFromSong(target,*source,*instrument),"recover source instrument");
+                    else
+                    {
+                        const auto recoveredSample=static_cast<SAMPLEINDEX>(file.GetNumSamples()+1);
+                        check(file.ReadSampleFromSong(recoveredSample,*source,*instrument),"recover source sample");
+                        file.Instruments[target]=new ModInstrument(recoveredSample); file.Instruments[target]->name=source->GetSampleName(*instrument); file.m_nInstruments=target;
+                    }
+                    recoveredAssets[*instrument]=target;
+                }
+                track.trackInstrument=recoveredAssets[*instrument];
+            }
+            SetCurrentColumn(base); const auto recovered=directory+P_("recovered-instrument.synpreset"); ComposerPreset(true,recovered);
+            auto saved=std::make_unique<CSoundFile>(); mpt::IO::InputFile savedInput(recovered); auto savedReader=GetFileReader(savedInput);
+            check(saved->Create(savedReader) && saved->m_synmptVersion==1 && saved->GetNumChannels()==file.GetNumChannels()-base,"recovered preset saves and reopens with the full hierarchy");
+            for(CHANNELINDEX channel=1;channel<saved->GetNumChannels();channel++)
+            {
+                if(saved->ChnSettings[channel].isBus) continue;
+                const auto beforeInstrument=file.ChnSettings[base+channel].trackInstrument, afterInstrument=saved->ChnSettings[channel].trackInstrument;
+                check(afterInstrument && saved->Instruments[afterInstrument],"recovered preset embeds every child instrument");
+                for(size_t key=0;key<saved->GetModSpecifications().noteMax;key++)
+                {
+                    const auto beforeSample=file.Instruments[beforeInstrument]->Keyboard[key], afterSample=saved->Instruments[afterInstrument]->Keyboard[key];
+                    if(!beforeSample) { check(!afterSample,"recovery preserves unmapped keys"); continue; }
+                    const auto &beforeData=file.GetSample(beforeSample), &afterData=saved->GetSample(afterSample);
+                    const bool same=afterSample && beforeData.HasSampleData() && afterData.HasSampleData() && beforeData.GetSampleSizeInBytes()==afterData.GetSampleSizeInBytes()
+                        && std::memcmp(beforeData.sampleb(),afterData.sampleb(),beforeData.GetSampleSizeInBytes())==0;
+                    if(!same) progress<<"Sample mismatch: child "<<channel<<", key "<<key<<", instruments "<<beforeInstrument<<"/"<<afterInstrument<<", samples "<<beforeSample<<"/"<<afterSample
+                        <<", lengths "<<beforeData.nLength<<"/"<<afterData.nLength<<", bytes "<<beforeData.GetSampleSizeInBytes()<<"/"<<afterData.GetSampleSizeInBytes()<<'\n';
+                    check(same,"recovered preset sample bytes match the source");
+                }
+            }
+            const auto previousTracks=file.GetNumChannels(); ComposerPreset(false,recovered);
+            check(file.GetNumChannels()==previousTracks+saved->GetNumChannels(),"recovered preset reloads through the actual preset command");
+        }
+    }
+    doc->SetModified(false);
 }

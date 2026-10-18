@@ -720,8 +720,11 @@ bool CSoundFile::ReadIT(FileReader &file, ModLoadingFlags loadFlags)
 	}
 
 	// Read mix plugins information
+	const auto pluginStart = file.GetPosition();
 	FileReader pluginChunk = file.ReadChunk((minPtr >= file.GetPosition()) ? minPtr - file.GetPosition() : file.BytesLeft());
 	const auto [hasPluginChunks, isBeRoTracker] = LoadMixPlugins(pluginChunk, false);
+	// Empty modules can place their extensions directly after these chunks.
+	auto lastDataOffset = pluginStart + pluginChunk.GetPosition();
 	if(hasPluginChunks)
 		hasModPlugExtensions = true;
 
@@ -752,6 +755,7 @@ bool CSoundFile::ReadIT(FileReader &file, ModLoadingFlags loadFlags)
 		// if(itHeader.cwtv == 0x0214 && itHeader.cmwt == 0x0214 && itHeader.reserved == ITFileHeader::chibiMagic) --> Chibi detected.
 		// But we'll just use autodetection here:
 		m_songMessage.Read(file, fileHeader.msglength, SongMessage::leAutodetect);
+		lastDataOffset = std::max(lastDataOffset, file.GetPosition());
 	}
 
 	// Reading Instruments
@@ -768,6 +772,7 @@ bool CSoundFile::ReadIT(FileReader &file, ModLoadingFlags loadFlags)
 			if(instrument != nullptr)
 			{
 				ITInstrToMPT(file, *instrument, fileHeader.cmwt);
+				lastDataOffset = std::max(lastDataOffset, file.GetPosition());
 				// MIDI Pitch Wheel Depth is a global setting in IT. Apply it to all instruments.
 				instrument->midiPWD = fileHeader.pwd;
 			}
@@ -777,7 +782,7 @@ bool CSoundFile::ReadIT(FileReader &file, ModLoadingFlags loadFlags)
 	// In order to properly compute the position, in file, of eventual extended settings
 	// such as "attack" we need to keep the "real" size of the last sample as those extra
 	// setting will follow this sample in the file
-	FileReader::pos_type lastSampleOffset = 0;
+	FileReader::pos_type lastSampleOffset = lastDataOffset;
 	if(fileHeader.smpnum > 0)
 	{
 		lastSampleOffset = smpPos[fileHeader.smpnum - 1] + sizeof(ITSample);
